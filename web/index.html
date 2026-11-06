@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Valmet Industrial Metaverse — Field-Service Copilot demo</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ec; --mute:#8b93a3; --ok:#3ecf6e; --warn:#f2b636; --bad:#ff4d4d; --acc:#4ea1ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; display:flex; height:100vh; overflow:hidden; }
+  #view { flex:1; position:relative; }
+  #view canvas { display:block; }
+  #hud { position:absolute; top:12px; left:12px; display:flex; gap:6px; flex-wrap:wrap; }
+  #hud button, #hud label { background:#000a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; cursor:pointer; font:inherit; }
+  #hud button[aria-pressed="true"] { border-color:var(--acc); color:var(--acc); }
+  #status { position:absolute; bottom:12px; left:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); }
+  #help { position:absolute; bottom:12px; right:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); font-size:12px; }
+  aside { width:400px; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }
+  aside h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:14px 14px 6px; }
+  #nearby { margin:0 14px; padding:0; list-style:none; max-height:30vh; overflow:auto; }
+  #nearby li { display:flex; justify-content:space-between; gap:8px; padding:5px 6px; border-bottom:1px solid var(--line); cursor:pointer; }
+  #nearby li:hover { background:#ffffff08; }
+  .chip { font-size:11px; padding:1px 6px; border-radius:10px; white-space:nowrap; }
+  .healthy { background:#3ecf6e22; color:var(--ok); } .warn { background:#f2b63622; color:var(--warn); } .bad { background:#ff4d4d22; color:var(--bad); } .none { background:#ffffff11; color:var(--mute); }
+  #chat { flex:1; overflow:auto; margin:0 14px; display:flex; flex-direction:column; gap:8px; }
+  .msg { padding:8px 10px; border-radius:8px; background:#ffffff08; white-space:normal; }
+  .msg.user { background:#4ea1ff1f; align-self:flex-end; max-width:85%; }
+  .msg code { background:#ffffff14; padding:0 3px; border-radius:3px; }
+  .msg .cite { color:var(--acc); }
+  form { display:flex; gap:6px; padding:12px 14px; border-top:1px solid var(--line); }
+  form input { flex:1; background:#0f1115; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
+  form button { background:var(--acc); color:#000; border:0; border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
+  .label3d { font:11px system-ui; padding:2px 6px; border-radius:4px; background:#000c; border-left:3px solid var(--mute); color:#fff; pointer-events:auto; cursor:pointer; white-space:nowrap; }
+  .label3d.healthy { border-color:var(--ok); } .label3d.warn { border-color:var(--warn); } .label3d.bad { border-color:var(--bad); font-weight:600; }
+  #loading { position:absolute; inset:0; display:grid; place-items:center; background:#0f1115e0; font-size:16px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+  "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.4.0/spark.module.js"
+} }
+</script>
+</head>
+<body>
+<div id="view">
+  <div id="hud">
+    <button id="play">▶ Start mission</button>
+    <button data-mode="follow" aria-pressed="true">Follow</button>
+    <button data-mode="orbit">Orbit</button>
+    <button data-mode="walk">Walk (WASD)</button>
+    <button id="all" aria-pressed="false">All frames</button>
+    <button id="ai">AI labels (CLIP)</button>
+    <label>Open splat… <input id="file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" hidden></label>
+  </div>
+  <div id="status">Loading…</div>
+  <div id="help">Walk: WASD / arrows (click view for mouse-look, Esc to release) · Orbit: drag / wheel</div>
+  <div id="loading">Loading splat scene…</div>
+</div>
+<aside>
+  <h2>Mission</h2>
+  <div id="mission" style="margin:0 14px;color:var(--mute)">—</div>
+  <h2>Assets in proximity radius</h2>
+  <ul id="nearby"></ul>
+  <h2>AI service copilot</h2>
+  <div id="chat"></div>
+  <form id="ask"><input id="q" placeholder="Ask about the selected asset…" autocomplete="off"><button>Ask</button></form>
+</aside>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+
+const RADIUS = 1.3, SPEED = 0.45, EYE = 0.75, MAX_LABELS = 6;
+const $ = (s) => document.querySelector(s);
+const view = $("#view");
+
+// ---------- three + spark
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+view.appendChild(renderer.domElement);
+const labels = new CSS2DRenderer();
+Object.assign(labels.domElement.style, { position: "absolute", top: 0, pointerEvents: "none" });
+view.appendChild(labels.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1115);
+const camera = new THREE.PerspectiveCamera(70, 1, 0.02, 200);
+scene.add(new SparkRenderer({ renderer }));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x333333, 2));
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = view;
+  renderer.setSize(w, h); labels.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize); resize();
+
+let splat;
+function setSplat(opts) {
+  if (splat) { scene.remove(splat); splat.dispose?.(); }
+  splat = new SplatMesh(opts);
+  splat.rotation.x = Math.PI; // pipeline frame: capture is y-down
+  scene.add(splat);
+  $("#loading").style.display = "grid";
+  splat.initialized.then(() => ($("#loading").style.display = "none"));
+}
+$("#file").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  setSplat({ fileBytes: new Uint8Array(await f.arrayBuffer()), fileName: f.name });
+  status(`Opened ${f.name} (semantic layer belongs to the bundled scene)`);
+});
+
+// ---------- scene data from the Python pipeline
+const S = await (await fetch("scene.json")).json();
+setSplat({ url: S.splat });
+const floorY = S.floor_y;
+const G = S.grid;
+const walkable = (x, z) => {
+  const i = Math.floor((x - G.origin[0]) / G.cell), j = Math.floor((z - G.origin[1]) / G.cell);
+  return i >= 0 && j >= 0 && i < G.w && j < G.h && G.walkable[j * G.w + i] === "1";
+};
+
+const stateClass = (o) => !o.asset ? "none" : o.id === S.target_object ? "bad"
+  : o.asset.condition_state === "healthy" ? "healthy" : "warn";
+const COLORS = { healthy: 0x3ecf6e, warn: 0xf2b636, bad: 0xff4d4d, none: 0x8b93a3 };
+
+function makeObj(o, color) {
+  const cls = stateClass(o);
+  const box = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(...o.size)),
+    new THREE.LineBasicMaterial({ color: color ?? COLORS[cls], transparent: true, opacity: 0.95 }));
+  box.position.set(...o.center);
+  const el = document.createElement("div");
+  el.className = `label3d ${cls}`;
+  el.textContent = o.asset ? `${o.asset.tag} · ${o.label}` : o.label;
+  const lab = new CSS2DObject(el);
+  lab.position.set(0, o.size[1] / 2 + 0.05, 0);
+  box.add(lab);
+  box.visible = false;
+  scene.add(box);
+  const obj = { ...o, cls, box, lab };
+  el.onclick = () => select(obj); // the live object, so vision results and photos show up
+  return obj;
+}
+const objs = S.objects.map((o) => makeObj(o));
+const target = objs.find((o) => o.id === S.target_object);
+window.demo = { objs }; // console access for inspecting vision results (o.ai, o.thumb)
+
+// path + avatar + proximity ring
+const pts = S.path.map((p) => new THREE.Vector3(p[0], floorY + 0.02, p[2]));
+const route = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+  new THREE.LineDashedMaterial({ color: 0xffd400, dashSize: 0.08, gapSize: 0.05 }));
+route.computeLineDistances();
+scene.add(route);
+const avatar = new THREE.Group();
+const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.5, 4, 12), new THREE.MeshStandardMaterial({ color: 0x4ea1ff, emissive: 0x113355 }));
+body.position.y = 0.35; avatar.add(body);
+const ring = new THREE.Mesh(new THREE.RingGeometry(RADIUS - 0.02, RADIUS, 64), new THREE.MeshBasicMaterial({ color: 0x4ea1ff, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+ring.rotation.x = -Math.PI / 2; ring.position.y = 0.03; avatar.add(ring);
+avatar.position.copy(pts[0]).setY(floorY);
+scene.add(avatar);
+
+$("#mission").innerHTML = `Target <b style="color:var(--bad)">${target.asset.tag} [${target.asset.asset_id}]</b> — ${target.asset.asset_class}, ${target.asset.issue_code ?? ""} · health ${target.asset.health_score}<br>
+${S.objects.length} framed objects · ${S.objects.filter((o) => o.asset).length} mapped to Excel · route ${S.path.length} waypoints`;
+
+// ---------- camera modes
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enabled = false;
+const fps = new PointerLockControls(camera, renderer.domElement);
+let mode = "follow";
+document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.mode === m));
+  orbit.enabled = m === "orbit";
+  body.visible = m !== "walk"; // first person: don't render own capsule
+  if (m === "orbit") { // bird's-eye overview of the nav grid
+    const cx = G.origin[0] + G.w * G.cell / 2, cz = G.origin[1] + G.h * G.cell / 2;
+    orbit.target.set(cx, floorY, cz); camera.position.set(cx, S.ceiling_y - 0.15, cz + G.h * G.cell * 0.45); // stay under the ceiling splats
+  }
+  if (m === "walk") {
+    playing = false;
+    camera.position.set(avatar.position.x, floorY + EYE, avatar.position.z);
+    const ahead = pts[Math.min(seg + 1, pts.length - 1)];
+    camera.lookAt(ahead.x, floorY + EYE, ahead.z); // level gaze toward the next waypoint
+  }
+  if (m !== "walk" && fps.isLocked) fps.unlock();
+}
+renderer.domElement.addEventListener("click", () => mode === "walk" && fps.lock());
+const keys = {};
+addEventListener("keydown", (e) => (keys[e.code] = true));
+addEventListener("keyup", (e) => {
+  keys[e.code] = false;
+  if (e.code === "ArrowUp") keys.KeyW = false;
+  if (e.code === "ArrowDown") keys.KeyS = false;
+});
+
+// ---------- mission playback
+let playing = false, seg = 0, arrived = false;
+$("#play").onclick = () => {
+  if (arrived) { seg = 0; arrived = false; avatar.position.copy(pts[0]).setY(floorY); }
+  playing = !playing; setMode("follow");
+  $("#play").textContent = playing ? "⏸ Pause" : "▶ Resume";
+};
+let showAll = false;
+$("#all").onclick = (e) => { showAll = !showAll; e.target.setAttribute("aria-pressed", showAll); };
+
+function stepMission(dt) {
+  if (!playing || arrived) return;
+  let move = SPEED * dt;
+  while (move > 0 && seg < pts.length - 1) {
+    const to = pts[seg + 1].clone().setY(floorY);
+    const d = to.distanceTo(avatar.position);
+    if (d <= move) { avatar.position.copy(to); seg++; move -= d; }
+    else { avatar.position.lerp(to, move / d); avatar.lookAt(to.x, floorY, to.z); move = 0; }
+  }
+  if (seg >= pts.length - 1) { arrived = true; playing = false; $("#play").textContent = "↺ Replay"; onArrive(); }
+}
+
+function stepWalk(dt) {
+  if (mode !== "walk") return;
+  // arrow keys turn too, for embedded views where Pointer Lock is refused
+  if (keys.ArrowLeft) camera.rotateOnWorldAxis(camera.up, 1.6 * dt);
+  if (keys.ArrowRight) camera.rotateOnWorldAxis(camera.up, -1.6 * dt);
+  if (keys.ArrowUp) keys.KeyW = true; if (keys.ArrowDown) keys.KeyS = true;
+  const v = 1.0 * dt, f = new THREE.Vector3(), r = new THREE.Vector3();
+  camera.getWorldDirection(f); f.y = 0; f.normalize(); r.crossVectors(f, camera.up);
+  const d = new THREE.Vector3();
+  if (keys.KeyW) d.add(f); if (keys.KeyS) d.sub(f); if (keys.KeyD) d.add(r); if (keys.KeyA) d.sub(r);
+  if (!d.lengthSq()) return;
+  d.normalize().multiplyScalar(v);
+  const p = camera.position;
+  // collide against the nav grid: slide along axes that stay walkable
+  if (walkable(p.x + d.x, p.z)) p.x += d.x;
+  if (walkable(p.x, p.z + d.z)) p.z += d.z;
+  avatar.position.set(p.x, floorY, p.z);
+}
+
+function followCam() {
+  if (mode !== "follow") return;
+  const back = new THREE.Vector3(0, 0, -1).applyQuaternion(avatar.quaternion);
+  const want = avatar.position.clone().addScaledVector(back, 1.4).add(new THREE.Vector3(0, 1.0, 0));
+  camera.position.lerp(want, 0.08);
+  camera.lookAt(avatar.position.x, floorY + 0.5, avatar.position.z);
+}
+
+// ---------- proximity display
+let lastNear = "";
+function proximity() {
+  const p = avatar.position;
+  const near = [];
+  for (const o of objs) {
+    const d = Math.hypot(o.center[0] - p.x, o.center[2] - p.z);
+    const on = showAll || d < RADIUS || o === target;
+    o.box.visible = on;
+    o.lab.visible = o === target;
+    if (d < RADIUS) near.push([d, o]);
+  }
+  // Excel-mapped assets first, then by distance; only the top few get 3D labels so text never piles up
+  near.sort((a, b) => (!a[1].asset - !b[1].asset) || a[0] - b[0]);
+  near.slice(0, MAX_LABELS).forEach(([, o]) => (o.lab.visible = true));
+  const key = near.map(([, o]) => o.id).join();
+  if (key === lastNear) return;
+  lastNear = key;
+  $("#nearby").innerHTML = near.map(([d, o]) => `<li data-id="${o.id}"><span>${o.asset ? `<b>${o.asset.tag}</b> ` : ""}${nameOf(o)}</span>
+    <span><span class="chip ${o.cls}">${o.asset ? (o === target ? "FAULT" : o.asset.condition_state) : "unregistered"}</span> ${d.toFixed(1)}</span></li>`).join("")
+    || `<li style="color:var(--mute)">No assets within ${RADIUS} m</li>`;
+  $("#nearby").querySelectorAll("li[data-id]").forEach((li) => li.onclick = () => select(objs.find((o) => o.id === li.dataset.id)));
+}
+
+// ---------- copilot
+let selected = target, history = [];
+const md = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])
+  .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/(^|\s)_(.+?)_(?=\s|$)/g, "$1<i>$2</i>")
+  .replace(/\[((?:ASSET|EVT|WO|CASE|DOC|DQ)-[^\]]+)\]/g, '<span class="cite">[$1]</span>').replace(/\n/g, "<br>");
+function say(role, text) {
+  const div = document.createElement("div");
+  div.className = `msg ${role}`; div.innerHTML = md(text);
+  $("#chat").append(div); $("#chat").scrollTop = 1e9;
+  return div;
+}
+async function copilot(question) {
+  if (!selected?.asset) return say("bot", "This object is not mapped to an Excel asset.");
+  const wait = say("bot", "…analysing evidence");
+  const r = await fetch("api/copilot", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ asset_id: selected.asset.asset_id, question, history }) })
+    .then((r) => r.json()).catch((e) => ({ error: `Copilot unavailable: ${e.message}` }));
+  wait.innerHTML = md(r.answer ?? r.error) + `<div style="color:var(--mute);font-size:11px;margin-top:4px">source: ${r.mode ?? "error"}</div>`;
+  if (r.answer) history.push({ role: "user", content: question ?? "ARRIVED: run full diagnosis." }, { role: "assistant", content: r.answer });
+}
+function select(o) {
+  selected = o; history = [];
+  $("#q").placeholder = o.asset ? `Ask about ${o.asset.tag}…` : "Not an Excel asset";
+  const seen = o.ai ? ` Vision (${o.ai.source}): ${o.ai.label} (${Math.round(o.ai.score * 100)}%), geometry: ${o.label}.` : "";
+  const msg = say("bot", (o.asset ? `Selected **${o.asset.tag}** [${o.asset.asset_id}] — ${o.asset.asset_class}, ${o.asset.condition_state}, health ${o.asset.health_score}.` : `Selected ${nameOf(o)} (unregistered).`) + seen);
+  msg.insertAdjacentHTML("beforeend", "<br>" +
+    (o.thumb ? `<img src="${o.thumb}" width="112" height="112" alt="3D render the AI saw for ${o.id}" title="3D splat render" style="margin:6px 6px 0 0;border-radius:4px;vertical-align:top">` : "") +
+    photoHTML(o.photo));
+}
+function onArrive() {
+  status(`Arrived at ${target.asset.tag} — running diagnosis`);
+  selected = target; history = [];
+  $("#q").placeholder = `Ask about ${target.asset.tag}…`;
+  say("bot", `🔴 **Arrived at faulty device ${target.asset.tag}.** Running grounded diagnosis…`);
+  copilot();
+}
+$("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); copilot(q); };
+
+// ---------- client-side AI vision: CLIP zero-shot labels for every 3D frame (transformers.js, no server, no key)
+const VOCAB = [ // prompt -> asset class; CLUTTER = not equipment
+  ["red circulation pump mounted on a pipe", "PROCESS_PUMP"], ["centrifugal pump with electric motor", "PROCESS_PUMP"],
+  ["electric motor", "ELECTRIC_MOTOR"], ["control valve with actuator", "CONTROL_VALVE"], ["hand wheel valve", "CONTROL_VALVE"],
+  ["pressure gauge", "PRESSURE_TRANSMITTER"], ["electrical control cabinet", "CABINET"], ["red expansion vessel tank", "TANK"],
+  ["blue pressure tank", "TANK"], ["white insulated pipe", "PIPE"], ["ladder", "CLUTTER"], ["red plastic storage box", "CLUTTER"],
+  ["cardboard box", "CLUTTER"], ["wire mesh cart", "CLUTTER"], ["office chair", "CLUTTER"], ["bare concrete wall", "CLUTTER"],
+];
+const MIN_SCORE = 0.3; // below this keep the geometric label
+const SIM_MIN = 0.03;  // CSLS margin (render vs video tile) needed to trust the photo match; calibrated by eye on pairs
+const AI_KEY = `clip-labels:v4:${S.objects.length}:${S.target_object}`;
+const nameOf = (o) => (o.ai && o.ai.score >= MIN_SCORE ? o.ai.label : o.label);
+function applyAI(o, r) {
+  o.ai = r;
+  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (r.score >= MIN_SCORE ? `${r.label} ${Math.round(r.score * 100)}%` : o.label);
+  o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}% · geometry: ${o.label}`;
+  if (r.cls === "CLUTTER" && r.score >= MIN_SCORE && !o.asset) { // vision says "not equipment": fade the frame
+    o.box.material.color.set(0x555555);
+    o.box.material.opacity = 0.35;
+  }
+}
+// a sharp video tile beats a blurry splat render when the match is solid and the photo label is more confident
+function decide(o) {
+  if (o.video) return { ...o.video, source: `video, ${o.video.views} views` }; // option 2 (multi-view, sharp) wins
+  const r = o.render, p = o.photo;
+  return p && p.csls >= SIM_MIN && p.score > r.score ? { ...p, source: "photo" } : { ...r, source: "render" };
+}
+const cached = JSON.parse(localStorage.getItem(AI_KEY) || "{}");
+objs.forEach((o) => {
+  const c = cached[o.id];
+  if (!c) return;
+  Object.assign(o, { render: c.render, photo: c.photo });
+  applyAI(o, decide(o));
+});
+// option 2 output (pipeline/video_lift.py on a GPU PC): multi-view labels + objects found only in the video
+fetch("video_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
+  if (!v) return;
+  for (const o of objs) if (v.labels[o.id]) { o.video = v.labels[o.id]; applyAI(o, decide(o)); }
+  for (const e of v.extra_objects) {
+    const o = makeObj({ ...e, asset: null }, 0x4ec9ff); // cyan = discovered in the video, not in the geometry pass
+    o.video = { label: e.label, score: e.score, cls: e.cls, views: 1 };
+    objs.push(o);
+    applyAI(o, decide(o));
+  }
+  $("#mission").insertAdjacentHTML("beforeend", `<br>Video lift: ${Object.keys(v.labels).length} boxes relabelled from ${v.registered_frames} frames · +${v.extra_objects.length} new objects`);
+}).catch(() => {});
+let videoIndex = null;
+const photoHTML = (p) => { // CSS-crop the matched tile out of the frame, no canvas needed
+  if (!p || !(p.csls >= SIM_MIN) || !videoIndex) return "";
+  const k = 112 / p.s;
+  return `<div title="video frame ${p.f + 1}s, similarity ${p.sim.toFixed(2)}" style="width:112px;height:112px;border-radius:4px;display:inline-block;margin:6px 6px 0 0;
+    background:url(frames/${videoIndex.files[p.f]}) ${-p.x * k}px ${-p.y * k}px / ${videoIndex.w * k}px ${videoIndex.h * k}px"></div>`;
+};
+
+const walkCells = [];
+for (let j = 0; j < G.h; j++) for (let i = 0; i < G.w; i++)
+  if (G.walkable[j * G.w + i] === "1") walkCells.push([G.origin[0] + (i + 0.5) * G.cell, G.origin[1] + (j + 0.5) * G.cell]);
+const snap = Object.assign(document.createElement("canvas"), { width: 224, height: 224 });
+const sctx = snap.getContext("2d", { willReadFrequently: true });
+const capCam = new THREE.PerspectiveCamera(60, 1, 0.02, 50);
+const nextFrame = () => new Promise(requestAnimationFrame);
+let capturing = false;
+
+async function captureBox(o) {
+  // look at the box from the nearest aisle cell: the side a technician would actually see
+  const c = new THREE.Vector3(...o.center);
+  let best = walkCells[0], bd = Infinity;
+  for (const w of walkCells) { const d = (w[0] - c.x) ** 2 + (w[1] - c.z) ** 2; if (d < bd) { bd = d; best = w; } }
+  const dir = new THREE.Vector3(best[0] - c.x, 0, best[1] - c.z);
+  if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
+  dir.normalize();
+  const size = Math.max(...o.size);
+  capCam.aspect = renderer.domElement.width / renderer.domElement.height;
+  // splats blur up close: never closer than 0.8 m, and keep the object at ~half the view height
+  capCam.position.copy(c).addScaledVector(dir, Math.max(0.8, size / Math.tan(THREE.MathUtils.degToRad(capCam.fov / 2))));
+  capCam.lookAt(c);
+  capCam.updateProjectionMatrix();
+  for (let k = 0; k < 3; k++) { renderer.render(scene, capCam); await nextFrame(); } // let Spark re-sort splats for this view
+  renderer.render(scene, capCam);
+  // crop the projected box (square, 25% context) and read pixels in the same task, before the buffer is cleared
+  const W = renderer.domElement.width, H = renderer.domElement.height;
+  let x0 = W, y0 = H, x1 = 0, y1 = 0;
+  for (const sx of [-0.5, 0.5]) for (const sy of [-0.5, 0.5]) for (const sz of [-0.5, 0.5]) {
+    const p = new THREE.Vector3(c.x + sx * o.size[0], c.y + sy * o.size[1], c.z + sz * o.size[2]).project(capCam);
+    const px = (p.x + 1) / 2 * W, py = (1 - p.y) / 2 * H;
+    x0 = Math.min(x0, px); x1 = Math.max(x1, px); y0 = Math.min(y0, py); y1 = Math.max(y1, py);
+  }
+  const side = Math.min(Math.max((x1 - x0) * 1.8, (y1 - y0) * 1.8, H * 0.3), W, H); // context helps CLIP on small parts
+  const cx = Math.min(Math.max((x0 + x1) / 2, side / 2), W - side / 2), cy = Math.min(Math.max((y0 + y1) / 2, side / 2), H - side / 2);
+  sctx.drawImage(renderer.domElement, cx - side / 2, cy - side / 2, side, side, 0, 0, 224, 224);
+}
+
+const MODEL = "Xenova/clip-vit-base-patch32";
+let TJS, clip, vision, processor, clipDevice;
+async function loadModels() {
+  TJS ??= await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/+esm");
+  if (clip) return;
+  const opts = (device) => ({ device, dtype: "q8", // quantized; cached by the browser after the first run
+    progress_callback: (p) => p.status === "progress_total" && status(`Downloading CLIP… ${Math.round(p.progress)}%`) });
+  // q8 runs slowly on WebGPU (dequantisation); the embedding model does ~1,900 images, so use fp16 where the GPU supports it
+  const f16 = !!(await navigator.gpu?.requestAdapter())?.features.has("shader-f16");
+  const load = async (device) => [
+    await TJS.pipeline("zero-shot-image-classification", MODEL, opts(device)),       // text-vs-image labels
+    await TJS.CLIPVisionModelWithProjection.from_pretrained(MODEL,                   // image embeddings for matching
+      { ...opts(device), dtype: device === "webgpu" && f16 ? "fp16" : "q8" }),
+  ];
+  clipDevice = navigator.gpu ? "webgpu" : "wasm";
+  [clip, vision] = await load(clipDevice).catch(() => load((clipDevice = "wasm")));
+  processor = await TJS.AutoProcessor.from_pretrained(MODEL);
+}
+async function embed(raws) { // L2-normalised CLIP image embeddings
+  const { image_embeds } = await vision(await processor(raws));
+  const d = image_embeds.dims.at(-1), data = image_embeds.data;
+  return raws.map((_, i) => {
+    const v = Float32Array.from(data.subarray(i * d, (i + 1) * d));
+    const n = Math.hypot(...v);
+    return v.map((x) => x / n);
+  });
+}
+const PROMPT = "a photo of a {} in an industrial boiler room";
+async function classify(raws) {
+  let out = await clip(raws, VOCAB.map((v) => v[0]), { hypothesis_template: PROMPT });
+  if (!Array.isArray(out[0])) out = [out];
+  return out.map((r) => ({ label: r[0].label, score: +r[0].score.toFixed(3), cls: VOCAB.find((v) => v[0] === r[0].label)[1] }));
+}
+const loadImg = (src) => new Promise((ok, err) => Object.assign(new Image(), { onload() { ok(this); }, onerror: err, src }));
+const tile = Object.assign(document.createElement("canvas"), { width: 224, height: 224 });
+const tctx = tile.getContext("2d", { willReadFrequently: true });
+function tileRaw(img, t) { tctx.drawImage(img, t.x, t.y, t.s, t.s, 0, 0, 224, 224); return TJS.RawImage.fromCanvas(tile); }
+
+async function indexVideo() {
+  // each frame -> 1 row of full-height squares + 2 rows of half-height squares, overlapping, so small parts get a close tile
+  const idx = await (await fetch("frames/index.json")).json();
+  const first = await loadImg(`frames/${idx.files[0]}`);
+  const W = first.naturalWidth, H = first.naturalHeight;
+  videoIndex = { files: idx.files, w: W, h: H };
+  const spots = (len, s, n) => Array.from({ length: n }, (_, i) => Math.round(n === 1 ? 0 : (i * (len - s)) / (n - 1)));
+  const layout = [];
+  for (const [s, nx, ny] of [[H, 3, 1], [Math.round(H / 2), 5, 2]])
+    for (const x of spots(W, s, nx)) for (const y of spots(H, s, ny)) layout.push({ x, y, s });
+  // embeddings are expensive (~4 s/frame with q8 on WebGPU): keep them in the Cache API after the first run
+  const key = `/tile-embeddings-v1-${idx.files.length}-${W}x${H}`;
+  const cache = await caches.open("valmet-demo");
+  const hit = await cache.match(key);
+  if (hit) {
+    const buf = new Float32Array(await hit.arrayBuffer()), d = buf.length / (idx.files.length * layout.length);
+    return idx.files.flatMap((_, f) => layout.map((t, k) => ({ f, ...t, e: buf.subarray((f * layout.length + k) * d, (f * layout.length + k + 1) * d) })));
+  }
+  const tiles = [];
+  for (let f = 0; f < idx.files.length; f++) {
+    const img = await loadImg(`frames/${idx.files[f]}`);
+    const embs = await embed(layout.map((t) => tileRaw(img, t)));
+    embs.forEach((e, k) => tiles.push({ f, ...layout[k], e }));
+    status(`Indexing walk-through video ${f + 1}/${idx.files.length} (once; cached afterwards)…`);
+  }
+  const all = new Float32Array(tiles.length * tiles[0].e.length);
+  tiles.forEach((t, i) => all.set(t.e, i * t.e.length));
+  await cache.put(key, new Response(all.buffer));
+  return tiles;
+}
+
+// frame list + size up front, so cached photo matches render without re-running the pass
+fetch("frames/index.json").then((r) => (r.ok ? r.json() : null)).then(async (idx) => {
+  if (!idx || videoIndex) return;
+  const im = await loadImg(`frames/${idx.files[0]}`);
+  videoIndex ??= { files: idx.files, w: im.naturalWidth, h: im.naturalHeight };
+}).catch(() => {});
+
+$("#ai").onclick = async () => {
+  const btn = $("#ai");
+  btn.disabled = true;
+  let hidden = [];
+  try {
+    status("Loading CLIP model in the browser…");
+    await loadModels();
+    const device = clipDevice, t0 = performance.now();
+    const tiles = await indexVideo();
+
+    // 1) render every 3D frame from the aisle, label it and embed it
+    capturing = true;
+    hidden = [route, avatar, ...objs.map((o) => o.box)].map((m) => [m, m.visible]);
+    hidden.forEach(([m]) => (m.visible = false));
+    labels.domElement.style.visibility = "hidden";
+    for (let i = 0; i < objs.length; i += 8) {
+      const batch = objs.slice(i, i + 8), raws = [];
+      for (const o of batch) {
+        await captureBox(o);
+        o.thumb = snap.toDataURL("image/jpeg", 0.7);
+        raws.push(TJS.RawImage.fromCanvas(snap));
+      }
+      const [labs, embs] = [await classify(raws), await embed(raws)];
+      batch.forEach((o, j) => { o.render = labs[j]; o.emb = embs[j]; });
+      status(`Rendering + labelling 3D frames ${Math.min(i + 8, objs.length)}/${objs.length} on ${device}…`);
+    }
+    hidden.forEach(([m, v]) => (m.visible = v));
+    labels.domElement.style.visibility = "";
+    capturing = false;
+
+    // 2) match each render to a video tile with CSLS (hubness-corrected cosine): with plain cosine a few bland
+    //    tiles (blank wall) are the "nearest" photo for every blurry render
+    const N = objs.length, T = tiles.length, D = tiles[0].e.length, KNN = 10;
+    const sim = new Float32Array(N * T);
+    objs.forEach((o, i) => tiles.forEach((t, j) => { let s = 0; for (let k = 0; k < D; k++) s += t.e[k] * o.emb[k]; sim[i * T + j] = s; }));
+    const meanTop = (vals) => { vals.sort((a, b) => b - a); let s = 0; for (let k = 0; k < KNN; k++) s += vals[k]; return s / KNN; };
+    const rObj = objs.map((_, i) => meanTop(sim.slice(i * T, (i + 1) * T)));
+    const rTile = tiles.map((_, j) => meanTop(Float32Array.from({ length: N }, (_, i) => sim[i * T + j])));
+    objs.forEach((o, i) => {
+      let bj = 0, bc = -Infinity;
+      for (let j = 0; j < T; j++) { const c = 2 * sim[i * T + j] - rObj[i] - rTile[j]; if (c > bc) { bc = c; bj = j; } }
+      const t = tiles[bj];
+      o.photo = { f: t.f, x: t.x, y: t.y, s: t.s, sim: +sim[i * T + bj].toFixed(3), csls: +bc.toFixed(3) };
+    });
+    const matched = objs.filter((o) => o.photo.csls >= SIM_MIN);
+    const frameImgs = new Map();
+    for (let i = 0; i < matched.length; i += 8) {
+      const batch = matched.slice(i, i + 8), raws = [];
+      for (const o of batch) {
+        if (!frameImgs.has(o.photo.f)) frameImgs.set(o.photo.f, await loadImg(`frames/${videoIndex.files[o.photo.f]}`));
+        raws.push(tileRaw(frameImgs.get(o.photo.f), o.photo));
+      }
+      (await classify(raws)).forEach((r, j) => Object.assign(batch[j].photo, r));
+      status(`Labelling matched video photos ${Math.min(i + 8, matched.length)}/${matched.length}…`);
+    }
+    objs.forEach((o) => applyAI(o, decide(o)));
+    localStorage.setItem(AI_KEY, JSON.stringify(Object.fromEntries(objs.map((o) => [o.id, { render: o.render, photo: o.photo }]))));
+
+    const sure = objs.filter((o) => o.ai.score >= MIN_SCORE);
+    const byRender = objs.filter((o) => o.render.score >= MIN_SCORE).length;
+    const counts = {};
+    sure.forEach((o) => (counts[o.ai.label] = (counts[o.ai.label] || 0) + 1));
+    status(`AI labelled ${sure.length}/${objs.length} frames (render only: ${byRender}) · ${matched.length} matched to video · ${((performance.now() - t0) / 1000).toFixed(0)} s on ${device}`);
+    say("bot", `**Vision pass done** (CLIP, ${device}). ${matched.length}/${objs.length} frames matched to a real video photo (CSLS ≥ ${SIM_MIN}). ` +
+      `Confident labels ${byRender} → **${sure.length}**: ` +
+      Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ×${v}`).join(", ") + ".");
+    lastNear = "";
+  } catch (e) {
+    status(`AI labelling failed: ${e.message}`);
+  } finally {
+    hidden.forEach(([m, v]) => (m.visible = v));
+    labels.domElement.style.visibility = "";
+    capturing = false;
+    btn.disabled = false;
+  }
+};
+
+// ---------- loop
+function status(t) { $("#status").textContent = t; }
+status("Ready — press Start mission");
+setMode("follow");
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (capturing) return; // the vision pass owns the canvas
+  stepMission(dt); stepWalk(dt); followCam(); proximity();
+  target.box.material.opacity = 0.55 + 0.45 * Math.sin(performance.now() / 200);
+  if (orbit.enabled) orbit.update();
+  if (playing) status(`En route to ${target.asset.tag} · ${avatar.position.distanceTo(pts.at(-1)).toFixed(1)} m left`);
+  renderer.render(scene, camera); labels.render(scene, camera);
+});
+</script>
+</body>
+</html>
