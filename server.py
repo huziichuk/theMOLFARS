@@ -4,6 +4,8 @@
 Copilot uses Google Gemini 3.5 Flash Lite when GEMINI_API_KEY is available,
 otherwise a deterministic evidence-only report built from the same context.
 """
+import base64
+import io
 import json
 import os
 import re
@@ -17,6 +19,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
+from PIL import Image
 from sqlalchemy import create_engine, text
 
 ROOT = Path(__file__).parent
@@ -227,10 +230,315 @@ async def save_vision(request: Request):
     if not ok:
         return JSONResponse(status_code=400, content={"error": "labels must be {OBJ-123: {...}} for the current scene_id"})
     out = ROOT / "web" / "vision_labels.json"
+    if out.exists():
+        try:
+            prev = json.loads(out.read_text()).get("labels", {})
+            for k, v in labels.items():
+                if k in prev and prev[k].get("gemini") and "gemini" not in v:
+                    v["gemini"] = prev[k]["gemini"]
+                    v["final"] = prev[k]["gemini"]
+        except Exception:
+            pass
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps({"scene_id": scene_id, "model": str(req.get("model", "")), "labels": labels}))
     tmp.replace(out)
     return {"saved": len(labels)}
+
+
+def crop_video_tile(photo: dict) -> bytes | None:
+    try:
+        idx_path = ROOT / "web" / "frames" / "index.json"
+        if not idx_path.exists():
+            return None
+        files = json.loads(idx_path.read_text())["files"]
+        f, x, y, s = int(photo["f"]), int(photo["x"]), int(photo["y"]), int(photo["s"])
+        img = Image.open(ROOT / "web" / "frames" / files[f])
+        crop = img.crop((x, y, x + s, y + s)).resize((384, 384))
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+@app.post("/api/vision/gemini")
+async def vision_gemini(request: Request):
+    """Classify a 3D object using Gemini 3.5 Flash Lite multimodal vision (3D splat render + video crop + 3D box geometry)."""
+    body = await request.body()
+    try:
+        req = json.loads(body or b"{}")
+        if not isinstance(req, dict):
+            raise TypeError
+        oid = str(req["object_id"])
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "object_id required"})
+
+    scene_path = ROOT / "web" / "scene.json"
+    vocab_path = ROOT / "web" / "vocab.json"
+    vlabels_path = ROOT / "web" / "vision_labels.json"
+    scene = json.loads(scene_path.read_text())
+    vocab = json.loads(vocab_path.read_text())
+    vocab_by_id = {c["id"]: c for c in vocab["classes"]}
+    obj = next((o for o in scene["objects"] if o["id"] == oid), None)
+    if not obj:
+        return JSONResponse(status_code=404, content={"error": f"unknown object {oid}"})
+
+    vdata = json.loads(vlabels_path.read_text()) if vlabels_path.exists() else {"scene_id": scene["scene_id"], "model": MODEL, "labels": {}}
+    entry = vdata.get("labels", {}).get(oid, {})
+    photo = req.get("photo") or entry.get("photo")
+
+    parts = []
+    render_b64 = req.get("render_b64")
+    if isinstance(render_b64, str) and "," in render_b64:
+        try:
+            raw = base64.b64decode(render_b64.split(",", 1)[1])
+            parts.append(types.Part.from_bytes(data=raw, mime_type="image/jpeg"))
+            parts.append(types.Part.from_text(text="Image 1: 3D Gaussian Splatting render crop of the object."))
+        except Exception:
+            pass
+    if isinstance(photo, dict) and photo.get("csls", 0) >= 0.03:
+        tile_bytes = crop_video_tile(photo)
+        if tile_bytes:
+            parts.append(types.Part.from_bytes(data=tile_bytes, mime_type="image/jpeg"))
+            parts.append(types.Part.from_text(text="Image 2: Sharp walk-through video frame crop matched to this 3D object."))
+    if not parts:
+        return JSONResponse(status_code=400, content={"error": "render_b64 or matched video photo required for visual classification"})
+
+    client = gemini_client()
+    if not client:
+        return JSONResponse(status_code=503, content={"error": "GEMINI_API_KEY not configured"})
+
+    base_y = round(obj["center"][1] - obj["size"][1] / 2 - scene["floor_y"], 2)
+    r_c, g_c, b_c = obj["color"]
+    color_hint = "saturated red" if (r_c > 0.45 and g_c < 0.62 * r_c and b_c < 0.62 * r_c) else f"RGB({r_c:.2f}, {g_c:.2f}, {b_c:.2f})"
+    class_desc = ", ".join(f"{c['id']} ({c['name']})" for c in vocab["classes"])
+    prompt = (
+        f"You are an expert facility and boiler-room engineer. Classify 3D object {oid} from the image(s) and 3D bounding box.\n"
+        f"NOTE: This room contains BOTH industrial boiler-room equipment (expansion tanks, boilers, circulation pumps, electric motors, control valves, pressure gauges, vibration sensors, electrical cabinets, insulated pipes, ducts) AND ordinary everyday utility items stored in the room (washing machines, cardboard boxes, plastic storage bins, a step ladder, chairs/stools, wheeled carts, ceiling lamps, walls/doors). Name the object honestly according to what it is.\n"
+        f"3D box size (W×H×D m): {obj['size']}, height above floor: {base_y} m, mean color: {color_hint}.\n"
+        f"Allowed class IDs: {class_desc}.\n"
+        'Return JSON: {"id": "<ALLOWED_CLASS_ID>", "label": "<Specific 2-5 word name>", "score": 0.0-1.0, "reason": "<1-sentence description>"}.'
+    )
+    parts.append(types.Part.from_text(text=prompt))
+    try:
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=parts,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1, max_output_tokens=300),
+        )
+        parsed = json.loads(resp.text)
+        if isinstance(parsed, list):
+            parsed = parsed[0] if (parsed and isinstance(parsed[0], dict)) else {}
+        elif not isinstance(parsed, dict):
+            parsed = {}
+        raw_id = str(parsed.get("id") or "").upper()
+        cid = raw_id if raw_id in vocab_by_id else (entry.get("final", {}).get("id") or "PIPE")
+        c = vocab_by_id[cid]
+        spec_label = str(parsed.get("label") or c["name"]).strip()[:80]
+        res = dict(
+            id=c["id"],
+            label=spec_label,
+            canonical_label=c["name"],
+            kind=c["kind"],
+            asset_class=c["asset_class"],
+            score=round(float(parsed.get("score", 0.85)), 3),
+            reason=str(parsed.get("reason", ""))[:240],
+            source=MODEL,
+        )
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"Gemini vision failed: {e}"})
+
+    entry["gemini"] = res
+    entry["final"] = res
+    vdata.setdefault("labels", {})[oid] = entry
+    vdata["scene_id"] = scene["scene_id"]
+    tmp = vlabels_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(vdata))
+    tmp.replace(vlabels_path)
+
+    obj["cls"] = "CLUTTER" if res["kind"] == "clutter" else (res["asset_class"] or res["id"])
+    obj["label"] = res["label"]
+    obj["reason"] = res["reason"]
+    obj["vision_source"] = MODEL
+    obj["vision_id"] = res["id"]
+    obj["vision_score"] = res["score"]
+    stmp = scene_path.with_suffix(".tmp")
+    stmp.write_text(json.dumps(scene))
+    stmp.replace(scene_path)
+    return {"object_id": oid, "result": res}
+
+
+@app.post("/api/vision/gemini-scene")
+async def vision_gemini_scene(request: Request):
+    """Run live Gemini 3.5 Flash Lite 2D object detection + 3D object classification on the current camera view."""
+    body = await request.body()
+    try:
+        req = json.loads(body or b"{}")
+        if not isinstance(req, dict):
+            raise TypeError
+        view_b64 = str(req["view_b64"])
+        candidates = req.get("candidates") or []
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "view_b64 required"})
+
+    if "," not in view_b64:
+        return JSONResponse(status_code=400, content={"error": "invalid data URL"})
+
+    client = gemini_client()
+    if not client:
+        return JSONResponse(status_code=503, content={"error": "GEMINI_API_KEY not configured"})
+
+    scene_path = ROOT / "web" / "scene.json"
+    vocab_path = ROOT / "web" / "vocab.json"
+    vlabels_path = ROOT / "web" / "vision_labels.json"
+    scene = json.loads(scene_path.read_text())
+    vocab = json.loads(vocab_path.read_text())
+    vocab_by_id = {c["id"]: c for c in vocab["classes"]}
+    objs_by_id = {o["id"]: o for o in scene["objects"]}
+    vdata = json.loads(vlabels_path.read_text()) if vlabels_path.exists() else {"scene_id": scene["scene_id"], "model": MODEL, "labels": {}}
+
+    raw = base64.b64decode(view_b64.split(",", 1)[1])
+    img_part = types.Part.from_bytes(data=raw, mime_type="image/jpeg")
+    class_desc = ", ".join(f"{c['id']} ({c['name']})" for c in vocab["classes"])
+    cand_json = json.dumps(candidates[:30], ensure_ascii=False)
+    prompt = (
+        "You are an expert facility and boiler-room vision system inspecting a live 3D Gaussian Splatting camera view.\n"
+        "NOTE: This room contains BOTH industrial boiler-room equipment (expansion tanks, boilers, circulation pumps, electric motors, control valves, pressure gauges, vibration sensors, electrical cabinets, insulated pipes, ducts) AND ordinary utility items present in the room (washing machines, cardboard boxes, plastic bins, a step ladder, chairs/stools, wheeled carts, ceiling lamps, walls/doors). Name each visible object honestly.\n"
+        f"Allowed class IDs: {class_desc}.\n"
+        f"3D candidate boxes projected into this view (with normalized 2D boxes [ymin, xmin, ymax, xmax] in 0..1000 and 3D size in meters):\n{cand_json}\n\n"
+        "Detect up to 14 distinct visible objects in the image, match each to the best `object_id` from the candidates list (or null if none matches), and return ONLY a JSON array:\n"
+        '[{"object_id": "OBJ-...", "id": "<ALLOWED_CLASS_ID>", "label": "<Specific 2-5 word name>", '
+        '"box_2d": [ymin, xmin, ymax, xmax], "score": 0.88, "reason": "<1-sentence description>"}]'
+    )
+    try:
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=[img_part, prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+        )
+        parsed = json.loads(resp.text or "[]")
+        if isinstance(parsed, dict):
+            parsed = parsed.get("detections") or parsed.get("objects") or [parsed]
+        if not isinstance(parsed, list):
+            parsed = []
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"Gemini scene scan failed: {e}"})
+
+    detections = []
+    updated = {}
+    for d in parsed:
+        if not isinstance(d, dict):
+            continue
+        raw_id = str(d.get("id") or "").upper()
+        cid = raw_id if raw_id in vocab_by_id else "PIPE"
+        c = vocab_by_id[cid]
+        spec_label = str(d.get("label") or c["name"]).strip()[:80]
+        score = round(float(d.get("score", 0.85)), 3)
+        reason = str(d.get("reason") or f"{c['name']} in boiler room").strip()[:240]
+        oid = d.get("object_id")
+        box_2d = d.get("box_2d")
+        if not (isinstance(box_2d, list) and len(box_2d) == 4):
+            box_2d = None
+        res = dict(
+            id=c["id"],
+            label=spec_label,
+            canonical_label=c["name"],
+            kind=c["kind"],
+            asset_class=c["asset_class"],
+            score=score,
+            reason=reason,
+            source=MODEL,
+        )
+        detections.append({**res, "object_id": oid if oid in objs_by_id else None, "box_2d": box_2d})
+        if oid in objs_by_id:
+            obj = objs_by_id[oid]
+            entry = vdata.setdefault("labels", {}).setdefault(oid, {})
+            entry["gemini"] = res
+            entry["final"] = res
+            obj["cls"] = "CLUTTER" if res["kind"] == "clutter" else (res["asset_class"] or res["id"])
+            obj["label"] = res["label"]
+            obj["reason"] = res["reason"]
+            obj["vision_source"] = MODEL
+            obj["vision_id"] = res["id"]
+            obj["vision_score"] = res["score"]
+            updated[oid] = res
+
+    if updated:
+        vdata["scene_id"] = scene["scene_id"]
+        tmp = vlabels_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(vdata))
+        tmp.replace(vlabels_path)
+        stmp = scene_path.with_suffix(".tmp")
+        stmp.write_text(json.dumps(scene))
+        stmp.replace(scene_path)
+
+    return {"detections": detections, "updated": updated}
+
+
+def object_scene_context(object_id: str) -> dict:
+    scene = json.loads((ROOT / "web" / "scene.json").read_text())
+    vlabels_path = ROOT / "web" / "vision_labels.json"
+    vdata = json.loads(vlabels_path.read_text()) if vlabels_path.exists() else {"labels": {}}
+    obj = next((o for o in scene["objects"] if o["id"] == object_id), None)
+    if not obj:
+        raise KeyError(object_id)
+    entry = vdata.get("labels", {}).get(object_id, {})
+    vis = entry.get("gemini") or entry.get("final") or {}
+    c = obj["center"]
+    s = obj["size"]
+    base_y = round(c[1] - s[1] / 2 - scene["floor_y"], 2)
+    nearby = []
+    for other in scene["objects"]:
+        if other["id"] == object_id or not other.get("asset"):
+            continue
+        oc = other["center"]
+        dist = round(((c[0] - oc[0]) ** 2 + (c[1] - oc[1]) ** 2 + (c[2] - oc[2]) ** 2) ** 0.5, 2)
+        nearby.append({
+            "object_id": other["id"],
+            "distance_m": dist,
+            "tag": other["asset"].get("tag"),
+            "asset_id": other["asset"].get("asset_id"),
+            "asset_class": other["asset"].get("asset_class"),
+            "condition_state": other["asset"].get("condition_state"),
+            "issue_code": other["asset"].get("issue_code"),
+        })
+    nearby.sort(key=lambda x: x["distance_m"])
+    return {
+        "object_id": obj["id"],
+        "class_id": vis.get("id") or obj["cls"],
+        "specific_label": vis.get("label") or obj["label"],
+        "canonical_label": vis.get("canonical_label") or obj.get("shape_label") or obj["label"],
+        "kind": vis.get("kind", "equipment"),
+        "confidence": vis.get("score", obj.get("vision_score", 0.75)),
+        "vision_reason": vis.get("reason") or obj.get("reason", ""),
+        "vision_source": vis.get("source") or obj.get("vision_source", MODEL),
+        "dimensions_m": {"width_x": s[0], "height_y": s[1], "depth_z": s[2]},
+        "elevation_above_floor_m": base_y,
+        "center_xyz_m": c,
+        "nearby_registered_assets": nearby[:4],
+    }
+
+
+def ask_gemini_scene_object(client: genai.Client, octx: dict, history: list, question: str) -> str:
+    sys_prompt = (
+        "You are a facility and boiler-room engineering copilot. "
+        "The technician selected a 3D object detected by Gemini Vision that is NOT registered in the Excel telemetry database. "
+        "The room contains both industrial heating/pumping equipment and ordinary utility items (washing machine, cardboard boxes, step ladder, chairs, wheeled carts). "
+        "Use the Gemini Vision classification, 3D physical measurements, elevation, and nearby registered assets to provide a practical assessment "
+        "(what the object is, its visual/physical traits, whether it is industrial equipment or a room/utility item, safety/housekeeping or inspection notes, and relationship to nearby assets). "
+        f"Reply in the language of the user's question (Russian if asked in Russian).\n\nOBJECT CONTEXT:\n{json.dumps(octx, ensure_ascii=False)}"
+    )
+    contents = []
+    for m in history:
+        role = "model" if m["role"] == "assistant" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=question)]))
+    r = client.models.generate_content(
+        model=MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(system_instruction=sys_prompt, max_output_tokens=700, temperature=0.2),
+    )
+    return r.text or ""
 
 
 @app.post("/api/copilot")
@@ -240,9 +548,9 @@ async def copilot(request: Request):
         req = json.loads(body or b"{}")
         if not isinstance(req, dict):
             raise TypeError
-        ctx = asset_context(str(req["asset_id"]))
-    except (KeyError, ValueError, TypeError):
-        return JSONResponse(status_code=400, content={"error": "asset_id required"})
+    except (ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+
     question = str(req.get("question") or "ARRIVED: run full diagnosis.")[:2000]
     raw_history = req.get("history")
     history = [
@@ -250,13 +558,56 @@ async def copilot(request: Request):
         for m in (raw_history if isinstance(raw_history, list) else [])
         if isinstance(m, dict) and m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
     ][-10:]
-    client = gemini_client()
-    if client:
+
+    if req.get("asset_id"):
         try:
-            return {"mode": MODEL, "answer": ask_gemini(client, ctx, history, question)}
-        except Exception as e:
-            print("[copilot] LLM unavailable:", type(e).__name__, e)
-    return {"mode": "offline-evidence", "answer": offline_report(ctx, question)}
+            ctx = asset_context(str(req["asset_id"]))
+        except KeyError:
+            return JSONResponse(status_code=400, content={"error": "unknown asset"})
+        client = gemini_client()
+        if client:
+            try:
+                return {"mode": MODEL, "answer": ask_gemini(client, ctx, history, question)}
+            except Exception as e:
+                print("[copilot] LLM unavailable:", type(e).__name__, e)
+        return {"mode": "offline-evidence", "answer": offline_report(ctx, question)}
+
+    if req.get("object_id"):
+        try:
+            octx = object_scene_context(str(req["object_id"]))
+        except KeyError:
+            return JSONResponse(status_code=400, content={"error": "unknown object"})
+        client = gemini_client()
+        if client:
+            try:
+                return {"mode": f"{MODEL} (scene-vision)", "answer": ask_gemini_scene_object(client, octx, history, question)}
+            except Exception as e:
+                print("[copilot] Scene LLM unavailable:", type(e).__name__, e)
+        d = octx["dimensions_m"]
+        return {
+            "mode": "offline-vision",
+            "answer": (
+                f"**{octx['specific_label']}** (`{octx['object_id']}`, class `{octx['class_id']}`, confidence {int(octx['confidence']*100)}%)\n"
+                f"- **Gemini Vision**: {octx['vision_reason'] or octx['canonical_label']}\n"
+                f"- **3D Dimensions**: {d['width_x']} × {d['height_y']} × {d['depth_z']} m (elevation +{octx['elevation_above_floor_m']} m)"
+            ),
+        }
+
+    return JSONResponse(status_code=400, content={"error": "asset_id or object_id required"})
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.middleware("http")
+async def no_cache_html_json(request: Request, call_next):
+    resp = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.endswith(".html") or p.endswith(".json") or p.endswith(".ply"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 app.mount("/", StaticFiles(directory=str(ROOT / "web"), html=True), name="web")

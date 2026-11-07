@@ -8,19 +8,19 @@
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; display:flex; height:100vh; overflow:hidden; }
   #view { flex:1; position:relative; }
-  #view canvas { display:block; }
-  #hud { position:absolute; top:12px; left:12px; display:flex; gap:6px; flex-wrap:wrap; }
+  #view > canvas { display:block; width:100% !important; height:100% !important; }
+  #hud { position:absolute; top:12px; left:12px; display:flex; gap:6px; flex-wrap:wrap; z-index:10; }
   #hud button, #hud label { background:#000a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; cursor:pointer; font:inherit; }
   #hud button[aria-pressed="true"] { border-color:var(--acc); color:var(--acc); }
-  #status { position:absolute; bottom:12px; left:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); }
-  #help { position:absolute; bottom:12px; right:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); font-size:12px; }
+  #status { position:absolute; bottom:12px; left:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); z-index:10; }
+  #help { position:absolute; bottom:12px; right:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); font-size:12px; z-index:10; }
   aside { width:400px; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }
   aside h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:14px 14px 6px; }
   #nearby { margin:0 14px; padding:0; list-style:none; max-height:30vh; overflow:auto; }
   #nearby li { display:flex; justify-content:space-between; gap:8px; padding:5px 6px; border-bottom:1px solid var(--line); cursor:pointer; }
   #nearby li:hover { background:#ffffff08; }
   .chip { font-size:11px; padding:1px 6px; border-radius:10px; white-space:nowrap; }
-  .healthy { background:#3ecf6e22; color:var(--ok); } .warn { background:#f2b63622; color:var(--warn); } .bad { background:#ff4d4d22; color:var(--bad); } .none { background:#ffffff11; color:var(--mute); }
+  .healthy { background:#3ecf6e22; color:var(--ok); } .warn { background:#f2b63622; color:var(--warn); } .bad { background:#ff4d4d22; color:var(--bad); } .info { background:#4ea1ff22; color:var(--acc); } .none { background:#ffffff11; color:var(--mute); }
   #chat { flex:1; overflow:auto; margin:0 14px; display:flex; flex-direction:column; gap:8px; }
   .msg { padding:8px 10px; border-radius:8px; background:#ffffff08; white-space:normal; }
   .msg.user { background:#4ea1ff1f; align-self:flex-end; max-width:85%; }
@@ -30,7 +30,22 @@
   form input { flex:1; background:#0f1115; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
   form button { background:var(--acc); color:#000; border:0; border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   .label3d { font:11px system-ui; padding:2px 6px; border-radius:4px; background:#000c; border-left:3px solid var(--mute); color:#fff; pointer-events:auto; cursor:pointer; white-space:nowrap; }
-  .label3d.healthy { border-color:var(--ok); } .label3d.warn { border-color:var(--warn); } .label3d.bad { border-color:var(--bad); font-weight:600; }
+  .label3d.healthy { border-color:var(--ok); } .label3d.warn { border-color:var(--warn); } .label3d.bad { border-color:var(--bad); font-weight:600; } .label3d.info { border-color:var(--acc); }
+  #gscan-overlay { position:absolute; inset:0; pointer-events:none; z-index:5; }
+  .gbox { position:absolute; border:2px solid var(--acc); border-radius:4px; background:#4ea1ff14; pointer-events:auto; cursor:pointer; }
+  .gbox span { position:absolute; top:-20px; left:-2px; background:var(--acc); color:#000; font:600 11px system-ui; padding:1px 6px; border-radius:3px; white-space:nowrap; }
+  #bim-panel { position:absolute; bottom:46px; left:12px; background:#11141ce8; border:1px solid var(--line); border-radius:8px; padding:6px 8px; z-index:10; box-shadow:0 6px 20px #0009; user-select:none; }
+  #bim-head { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11px; color:var(--mute); margin-bottom:4px; }
+  #bim-head b { color:var(--text); letter-spacing:.03em; }
+  #bim-head button { background:transparent; color:var(--mute); border:1px solid var(--line); border-radius:4px; padding:1px 6px; font-size:10px; cursor:pointer; }
+  #bim-canvas { display:block; border-radius:4px; cursor:crosshair; background:#0b0d12; }
+  #bim-legend { display:flex; gap:8px; flex-wrap:wrap; font-size:10px; color:var(--mute); margin-top:4px; }
+  #bim-legend span::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  #bim-legend .l-bad::before { background:var(--bad); }
+  #bim-legend .l-warn::before { background:var(--warn); }
+  #bim-legend .l-ok::before { background:var(--ok); }
+  #bim-legend .l-eq::before { background:var(--acc); }
+  #bim-legend .l-pipe::before { background:#2d6896; }
   #loading { position:absolute; inset:0; display:grid; place-items:center; background:#0f1115e0; font-size:16px; }
 </style>
 <script type="importmap">
@@ -49,8 +64,21 @@
     <button data-mode="orbit">Orbit</button>
     <button data-mode="walk">Walk (WASD)</button>
     <button id="all" aria-pressed="false">All frames</button>
+    <button id="bim-btn" aria-pressed="true">🗺️ BIM План</button>
     <button id="ai">AI labels (CLIP)</button>
+    <button id="gemini-hud" style="border-color:var(--acc);color:var(--acc)">✨ Gemini Скан вида</button>
     <label>Open splat… <input id="file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" hidden></label>
+  </div>
+  <div id="gscan-overlay"></div>
+  <div id="bim-panel">
+    <div id="bim-head">
+      <span><b>BIM SEMANTIC FLOOR LAYOUT</b> · клик — актив, 2×клик — телепорт</span>
+      <button id="bim-size" type="button">⛶ Крупно</button>
+    </div>
+    <canvas id="bim-canvas" width="280" height="205"></canvas>
+    <div id="bim-legend">
+      <span class="l-bad">Fault</span><span class="l-warn">Maint</span><span class="l-ok">Healthy</span><span class="l-eq">Equipment</span><span class="l-pipe">Pipe/Duct</span>
+    </div>
   </div>
   <div id="status">Loading…</div>
   <div id="help">Walk: WASD / arrows (click view for mouse-look, Esc to release) · Orbit: drag / wheel</div>
@@ -78,8 +106,8 @@ const $ = (s) => document.querySelector(s);
 const view = $("#view");
 
 // ---------- three + spark
-const renderer = new THREE.WebGLRenderer({ antialias: false });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+renderer.setPixelRatio(0.85);
 view.appendChild(renderer.domElement);
 const labels = new CSS2DRenderer();
 Object.assign(labels.domElement.style, { position: "absolute", top: 0, pointerEvents: "none" });
@@ -90,10 +118,14 @@ const camera = new THREE.PerspectiveCamera(70, 1, 0.02, 200);
 scene.add(new SparkRenderer({ renderer }));
 scene.add(new THREE.HemisphereLight(0xffffff, 0x333333, 2));
 
+let wakeUntil = performance.now() + 3000;
+const wake = (ms = 1200) => { wakeUntil = Math.max(wakeUntil, performance.now() + ms); };
+
 function resize() {
   const { clientWidth: w, clientHeight: h } = view;
   renderer.setSize(w, h); labels.setSize(w, h);
   camera.aspect = w / h; camera.updateProjectionMatrix();
+  wake(1000);
 }
 addEventListener("resize", resize); resize();
 
@@ -104,7 +136,7 @@ function setSplat(opts) {
   splat.rotation.x = Math.PI; // pipeline frame: capture is y-down
   scene.add(splat);
   $("#loading").style.display = "grid";
-  splat.initialized.then(() => ($("#loading").style.display = "none"));
+  splat.initialized.then(() => { $("#loading").style.display = "none"; wake(2500); });
 }
 $("#file").addEventListener("change", async (e) => {
   const f = e.target.files[0]; if (!f) return;
@@ -122,9 +154,9 @@ const walkable = (x, z) => {
   return i >= 0 && j >= 0 && i < G.w && j < G.h && G.walkable[j * G.w + i] === "1";
 };
 
-const stateClass = (o) => !o.asset ? "none" : o.id === S.target_object ? "bad"
+const stateClass = (o) => !o.asset ? (o.cls && o.cls !== "CLUTTER" && o.cls !== "PIPE" ? "info" : "none") : o.id === S.target_object ? "bad"
   : o.asset.condition_state === "healthy" ? "healthy" : "warn";
-const COLORS = { healthy: 0x3ecf6e, warn: 0xf2b636, bad: 0xff4d4d, none: 0x8b93a3 };
+const COLORS = { healthy: 0x3ecf6e, warn: 0xf2b636, bad: 0xff4d4d, info: 0x4ea1ff, none: 0x8b93a3 };
 
 function makeObj(o, color) {
   const cls = stateClass(o);
@@ -137,9 +169,7 @@ function makeObj(o, color) {
   el.textContent = o.asset ? `${o.asset.tag} · ${o.label}` : o.label;
   const lab = new CSS2DObject(el);
   lab.position.set(0, o.size[1] / 2 + 0.05, 0);
-  box.add(lab);
   box.visible = false;
-  scene.add(box);
   const obj = { ...o, cls, box, lab };
   el.onclick = () => select(obj); // the live object, so vision results and photos show up
   return obj;
@@ -168,7 +198,9 @@ ${S.objects.length} framed objects · ${S.objects.filter((o) => o.asset).length}
 // ---------- camera modes
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enabled = false;
+orbit.addEventListener("change", () => wake(600));
 const fps = new PointerLockControls(camera, renderer.domElement);
+fps.addEventListener("change", () => wake(600));
 let mode = "follow";
 document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
 function setMode(m) {
@@ -187,14 +219,16 @@ function setMode(m) {
     camera.lookAt(ahead.x, floorY + EYE, ahead.z); // level gaze toward the next waypoint
   }
   if (m !== "walk" && fps.isLocked) fps.unlock();
+  wake(1200);
 }
 renderer.domElement.addEventListener("click", () => mode === "walk" && fps.lock());
 const keys = {};
-addEventListener("keydown", (e) => (keys[e.code] = true));
+addEventListener("keydown", (e) => { keys[e.code] = true; wake(600); });
 addEventListener("keyup", (e) => {
   keys[e.code] = false;
   if (e.code === "ArrowUp") keys.KeyW = false;
   if (e.code === "ArrowDown") keys.KeyS = false;
+  wake(600);
 });
 
 // ---------- mission playback
@@ -203,9 +237,10 @@ $("#play").onclick = () => {
   if (arrived) { seg = 0; arrived = false; avatar.position.copy(pts[0]).setY(floorY); }
   playing = !playing; setMode("follow");
   $("#play").textContent = playing ? "⏸ Pause" : "▶ Resume";
+  wake(1500);
 };
 let showAll = false;
-$("#all").onclick = (e) => { showAll = !showAll; e.target.setAttribute("aria-pressed", showAll); };
+$("#all").onclick = (e) => { showAll = !showAll; e.target.setAttribute("aria-pressed", showAll); proximity(); wake(800); };
 
 function stepMission(dt) {
   if (!playing || arrived) return;
@@ -222,14 +257,15 @@ function stepMission(dt) {
 function stepWalk(dt) {
   if (mode !== "walk") return;
   // arrow keys turn too, for embedded views where Pointer Lock is refused
-  if (keys.ArrowLeft) camera.rotateOnWorldAxis(camera.up, 1.6 * dt);
-  if (keys.ArrowRight) camera.rotateOnWorldAxis(camera.up, -1.6 * dt);
+  if (keys.ArrowLeft) { camera.rotateOnWorldAxis(camera.up, 1.6 * dt); wake(400); }
+  if (keys.ArrowRight) { camera.rotateOnWorldAxis(camera.up, -1.6 * dt); wake(400); }
   if (keys.ArrowUp) keys.KeyW = true; if (keys.ArrowDown) keys.KeyS = true;
   const v = 1.0 * dt, f = new THREE.Vector3(), r = new THREE.Vector3();
   camera.getWorldDirection(f); f.y = 0; f.normalize(); r.crossVectors(f, camera.up);
   const d = new THREE.Vector3();
   if (keys.KeyW) d.add(f); if (keys.KeyS) d.sub(f); if (keys.KeyD) d.add(r); if (keys.KeyA) d.sub(r);
   if (!d.lengthSq()) return;
+  wake(500);
   d.normalize().multiplyScalar(v);
   const p = camera.position;
   // collide against the nav grid: slide along axes that stay walkable
@@ -242,39 +278,82 @@ function followCam() {
   if (mode !== "follow") return;
   const back = new THREE.Vector3(0, 0, -1).applyQuaternion(avatar.quaternion);
   const want = avatar.position.clone().addScaledVector(back, 1.4).add(new THREE.Vector3(0, 1.0, 0));
+  if (camera.position.distanceToSquared(want) > 1e-4) wake(400);
   camera.position.lerp(want, 0.08);
   camera.lookAt(avatar.position.x, floorY + 0.5, avatar.position.z);
 }
 
-// ---------- proximity display
-let lastNear = "";
+// ---------- proximity display & fragment deduplication
+let lastNear = "", lastPx = NaN, lastPz = NaN, lastShowAll = false, lastSelId = "";
+const activeLabs = new Set(), activeBoxes = new Set();
+
+// Flag sub-fragments of multi-part objects (e.g. multiple bounding boxes on same equipment)
+for (const o of objs) {
+  if (o.asset) continue;
+  const vid = o.ai?.id ?? o.vision_id ?? o.cls;
+  const vol = o.size[0] * o.size[1] * o.size[2];
+  for (const other of objs) {
+    if (other === o) continue;
+    const otherVid = other.ai?.id ?? other.vision_id ?? other.cls;
+    if (otherVid === vid || ((vid === "APPLIANCE" || vid === "TANK" || vid === "CABINET") && otherVid === vid)) {
+      const otherVol = other.size[0] * other.size[1] * other.size[2];
+      if (otherVol > vol * 1.8) {
+        const dist = Math.hypot(o.center[0] - other.center[0], o.center[1] - other.center[1], o.center[2] - other.center[2]);
+        if (dist < 0.85) { o.isFragment = true; break; }
+      }
+    }
+  }
+}
+
+const isNoise = (o) => {
+  if (o.asset || o === target || o === selected) return false;
+  if (o.isFragment) return true;
+  const vid = o.ai?.id ?? o.vision_id ?? o.cls;
+  if (vid === "STRUCTURE" || vid === "PIPE" || vid === "DUCT" || vid === "LAMP") return true;
+  const maxDim = Math.max(...o.size), minDim = Math.min(...o.size);
+  if (minDim < 0.06 && maxDim < 0.25) return true;
+  return false;
+};
+
 function proximity() {
   const p = avatar.position;
+  const selId = selected?.id ?? "";
+  if (lastNear !== "" && showAll === lastShowAll && selId === lastSelId && Math.hypot(p.x - lastPx, p.z - lastPz) < 0.02) return;
+  lastPx = p.x; lastPz = p.z; lastShowAll = showAll; lastSelId = selId;
   const near = [];
   for (const o of objs) {
+    const hide = isNoise(o);
     const d = Math.hypot(o.center[0] - p.x, o.center[2] - p.z);
-    const on = showAll || d < RADIUS || o === target;
+    const on = (!hide && (showAll || d < RADIUS)) || o === target || o === selected;
     o.box.visible = on;
-    o.lab.visible = o === target;
-    if (d < RADIUS) near.push([d, o]);
+    if (on && !activeBoxes.has(o)) { scene.add(o.box); activeBoxes.add(o); }
+    else if (!on && activeBoxes.has(o)) { scene.remove(o.box); activeBoxes.delete(o); }
+    if (!hide && d < RADIUS) near.push([d, o]);
   }
-  // Excel-mapped assets first, then by distance; only the top few get 3D labels so text never piles up
+  // Excel-mapped assets first, then by distance; only attach CSS2DObject to the few visible labels for high FPS
   near.sort((a, b) => (!a[1].asset - !b[1].asset) || a[0] - b[0]);
-  near.slice(0, MAX_LABELS).forEach(([, o]) => (o.lab.visible = true));
-  const key = near.map(([, o]) => o.id).join();
+  const wantLabs = new Set([target, ...(selected && !isNoise(selected) ? [selected] : []), ...near.slice(0, MAX_LABELS).map(([, o]) => o)]);
+  for (const o of activeLabs) if (!wantLabs.has(o)) { o.box.remove(o.lab); activeLabs.delete(o); }
+  for (const o of wantLabs) if (!activeLabs.has(o)) { o.box.add(o.lab); activeLabs.add(o); }
+  drawBimMap();
+  wake(400);
+  const key = near.map(([, o]) => o.id).join() + ":" + selId;
   if (key === lastNear) return;
   lastNear = key;
-  $("#nearby").innerHTML = near.map(([d, o]) => `<li data-id="${o.id}"><span>${o.asset ? `<b>${o.asset.tag}</b> ` : ""}${nameOf(o)}</span>
-    <span><span class="chip ${o.cls}">${o.asset ? (o === target ? "FAULT" : o.asset.condition_state) : "unregistered"}</span> ${d.toFixed(1)}</span></li>`).join("")
+  $("#nearby").innerHTML = near.map(([d, o]) => {
+    const tagChip = o.asset ? (o === target ? "FAULT" : o.asset.condition_state) : (o.ai?.id ?? o.vision_id ?? o.cls ?? "SCENE");
+    return `<li data-id="${o.id}"><span>${o.asset ? `<b>${o.asset.tag}</b> ` : `<code style="font-size:11px;color:var(--mute)">${o.id}</code> `}${nameOf(o)}</span>
+    <span><span class="chip ${o.cls}">${tagChip}</span> ${d.toFixed(1)}</span></li>`;
+  }).join("")
     || `<li style="color:var(--mute)">No assets within ${RADIUS} m</li>`;
   $("#nearby").querySelectorAll("li[data-id]").forEach((li) => li.onclick = () => select(objs.find((o) => o.id === li.dataset.id)));
 }
 
-// ---------- copilot
+// ---------- copilot & Gemini Vision inspector (works for both Excel and non-Excel industrial objects)
 let selected = target, history = [];
 const md = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])
   .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/(^|\s)_(.+?)_(?=\s|$)/g, "$1<i>$2</i>")
-  .replace(/\[((?:ASSET|EVT|WO|CASE|DOC|DQ)-[^\]]+)\]/g, '<span class="cite">[$1]</span>').replace(/\n/g, "<br>");
+  .replace(/\[((?:ASSET|EVT|WO|CASE|DOC|DQ|OBJ)-[^\]]+)\]/g, '<span class="cite">[$1]</span>').replace(/\n/g, "<br>");
 function say(role, text) {
   const div = document.createElement("div");
   div.className = `msg ${role}`; div.innerHTML = md(text);
@@ -282,23 +361,147 @@ function say(role, text) {
   return div;
 }
 async function copilot(question) {
-  if (!selected?.asset) return say("bot", "This object is not mapped to an Excel asset.");
-  const h = history; // select() swaps `history` while we wait; the answer belongs to the asset that was asked about
-  const wait = say("bot", "…analysing evidence");
+  if (!selected) return;
+  const h = history;
+  const wait = say("bot", "…Gemini Copilot analysing industrial object");
+  const payload = selected.asset
+    ? { asset_id: selected.asset.asset_id, question, history: h }
+    : { object_id: selected.id, question: question ?? "Проведи техническую инспекцию этого промышленного объекта в котельной (назначение, параметры, на что обратить внимание).", history: h };
   const r = await fetch("api/copilot", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ asset_id: selected.asset.asset_id, question, history: h }) })
+    body: JSON.stringify(payload) })
     .then((r) => r.json()).catch((e) => ({ error: `Copilot unavailable: ${e.message}` }));
   wait.innerHTML = md(r.answer ?? r.error) + `<div style="color:var(--mute);font-size:11px;margin-top:4px">source: ${r.mode ?? "error"}</div>`;
-  if (r.answer) h.push({ role: "user", content: question ?? "ARRIVED: run full diagnosis." }, { role: "assistant", content: r.answer });
+  if (r.answer) h.push({ role: "user", content: payload.question ?? "ARRIVED: run full diagnosis." }, { role: "assistant", content: r.answer });
+}
+async function geminiClassify(o, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "…Gemini Vision"; }
+  try {
+    if (!o.thumb) {
+      capturing = true;
+      const hidden = [route, avatar, ...objs.map((x) => x.box)].map((m) => [m, m.visible]);
+      hidden.forEach(([m]) => (m.visible = false));
+      labels.domElement.style.visibility = "hidden";
+      await captureBox(o);
+      o.thumb = snap.toDataURL("image/jpeg", 0.8);
+      hidden.forEach(([m, v]) => (m.visible = v));
+      labels.domElement.style.visibility = "";
+      capturing = false;
+    }
+    const r = await fetch("api/vision/gemini", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ object_id: o.id, render_b64: o.thumb, photo: o.photo })
+    }).then((r) => r.json());
+    if (r.result) {
+      o.gemini = r.result; o.final = r.result; o.label = r.result.label; o.reason = r.result.reason;
+      applyAI(o, decide(o)); lastNear = "";
+      say("bot", `✨ **Gemini Vision (${r.result.source})** → \`[${o.id}]\` **${r.result.label}** (\`${r.result.id}\`, ${Math.round(r.result.score * 100)}%)\n_${r.result.reason}_`);
+    } else say("bot", `Gemini Vision error: ${r.error ?? "unknown"}`);
+  } catch (e) {
+    capturing = false;
+    say("bot", `Gemini Vision unavailable: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini Vision (Объект)"; }
+  }
+}
+async function geminiScanScene(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "…Сканирование вида"; }
+  const overlay = $("#gscan-overlay");
+  overlay.innerHTML = "";
+  try {
+    capturing = true;
+    const hidden = [route, avatar, ...objs.map((x) => x.box)].map((m) => [m, m.visible]);
+    hidden.forEach(([m]) => (m.visible = false));
+    labels.domElement.style.visibility = "hidden";
+    renderer.render(scene, camera);
+    const scanCanvas = document.createElement("canvas");
+    scanCanvas.width = 768; scanCanvas.height = 512;
+    scanCanvas.getContext("2d").drawImage(renderer.domElement, 0, 0, 768, 512);
+    const view_b64 = scanCanvas.toDataURL("image/jpeg", 0.82);
+    hidden.forEach(([m, v]) => (m.visible = v));
+    labels.domElement.style.visibility = "";
+    capturing = false;
+
+    const cands = [];
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    for (const o of objs) {
+      const c = new THREE.Vector3(...o.center);
+      const dist = c.distanceTo(camera.position);
+      if (dist > 4.2 || !frustum.containsPoint(c)) continue;
+      const s = o.size;
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (const dx of [-0.5, 0.5]) for (const dy of [-0.5, 0.5]) for (const dz of [-0.5, 0.5]) {
+        const p = new THREE.Vector3(c.x + dx * s[0], c.y + dy * s[1], c.z + dz * s[2]).project(camera);
+        const px = (p.x * 0.5 + 0.5) * 1000, py = (-p.y * 0.5 + 0.5) * 1000;
+        x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py);
+      }
+      cands.push({
+        id: o.id,
+        box_2d: [Math.max(0, Math.round(y0)), Math.max(0, Math.round(x0)), Math.min(1000, Math.round(y1)), Math.min(1000, Math.round(x1))],
+        size_m: o.size.map((v) => +v.toFixed(2)),
+        elevation_m: +(o.center[1] - o.size[1] / 2 - floorY).toFixed(2),
+        current_label: nameOf(o),
+      });
+    }
+    cands.sort((a, b) => (b.box_2d[2] - b.box_2d[0]) * (b.box_2d[3] - b.box_2d[1]) - (a.box_2d[2] - a.box_2d[0]) * (a.box_2d[3] - a.box_2d[1]));
+
+    const r = await fetch("api/vision/gemini-scene", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ view_b64, candidates: cands.slice(0, 25) })
+    }).then((r) => r.json());
+
+    if (r.detections) {
+      for (const [oid, res] of Object.entries(r.updated || {})) {
+        const o = objs.find((x) => x.id === oid);
+        if (o) { o.gemini = res; o.final = res; o.label = res.label; o.reason = res.reason; applyAI(o, decide(o)); }
+      }
+      lastNear = "";
+      for (const d of r.detections) {
+        if (!d.box_2d) continue;
+        const [ymin, xmin, ymax, xmax] = d.box_2d;
+        const b = document.createElement("div");
+        b.className = "gbox";
+        b.style.cssText = `top:${ymin / 10}%;left:${xmin / 10}%;height:${Math.max(3, (ymax - ymin) / 10)}%;width:${Math.max(3, (xmax - xmin) / 10)}%`;
+        b.innerHTML = `<span>${d.object_id ? `${d.object_id} · ` : ""}${d.label} (${Math.round(d.score * 100)}%)</span>`;
+        b.title = d.reason || d.label;
+        b.onclick = () => { overlay.innerHTML = ""; if (d.object_id) { const o = objs.find((x) => x.id === d.object_id); if (o) select(o); } };
+        overlay.appendChild(b);
+      }
+      setTimeout(() => { overlay.innerHTML = ""; }, 9000);
+      const summary = r.detections.map((d) => `- ${d.object_id ? `**[${d.object_id}]** ` : ""}**${d.label}** (\`${d.id}\`, ${Math.round(d.score * 100)}%): _${d.reason}_`).join("\n");
+      say("bot", `✨ **Gemini Vision — Скан текущего вида (${r.detections.length} пром. объектов):**\n${summary || "Объекты не обнаружены"}`);
+    } else {
+      say("bot", `Gemini scan error: ${r.error ?? "unknown"}`);
+    }
+  } catch (e) {
+    capturing = false;
+    say("bot", `Gemini scan unavailable: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini Скан вида"; }
+  }
 }
 function select(o) {
+  if (!o) return;
   selected = o; history = [];
-  $("#q").placeholder = o.asset ? `Ask about ${o.asset.tag}…` : "Not an Excel asset";
-  const seen = o.ai ? ` Vision (${o.ai.source}): ${sure(o) ? "" : "unsure, best guess "}${o.ai.label} (${Math.round(o.ai.score * 100)}%), shape guess: ${o.label}.` : "";
-  const msg = say("bot", (o.asset ? `Selected **${o.asset.tag}** [${o.asset.asset_id}] — ${o.asset.asset_class}, ${o.asset.condition_state}, health ${o.asset.health_score}.` : `Selected ${nameOf(o)} (unregistered).`) + seen);
+  $("#q").placeholder = o.asset ? `Ask about ${o.asset.tag}…` : `Спросить Gemini про ${nameOf(o)} [${o.id}]…`;
+  const r = o.ai || {};
+  const reason = r.reason || o.reason || "";
+  const elev = (o.center[1] - o.size[1] / 2 - floorY).toFixed(2);
+  const dims = `${o.size[0].toFixed(2)}×${o.size[1].toFixed(2)}×${o.size[2].toFixed(2)} m (h=${elev} m)`;
+  const head = o.asset
+    ? `Selected **${o.asset.tag}** [${o.asset.asset_id}] — **${nameOf(o)}** (${o.asset.asset_class}, ${o.asset.condition_state}, health ${o.asset.health_score}).`
+    : `Selected **[${o.id}] ${nameOf(o)}** — класс \`${r.id ?? o.vision_id ?? o.cls}\` (${Math.round((r.score ?? o.vision_score ?? 0.75) * 100)}%, источник: \`${r.source ?? o.vision_source ?? "gemini-vision"}\`).`;
+  const desc = (reason ? `\n_${reason}_` : "") + `\nГабариты 3D: \`${dims}\``;
+  const msg = say("bot", head + desc);
   msg.insertAdjacentHTML("beforeend", "<br>" +
     (o.thumb ? `<img src="${o.thumb}" width="112" height="112" alt="3D render the AI saw for ${o.id}" title="3D splat render" style="margin:6px 6px 0 0;border-radius:4px;vertical-align:top">` : "") +
-    photoHTML(o.photo));
+    photoHTML(o.photo) +
+    `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+      <button type="button" class="gvis" style="font-size:11px;padding:4px 8px;cursor:pointer">✨ Gemini Vision (Объект)</button>
+      <button type="button" class="ginspect" style="font-size:11px;padding:4px 8px;cursor:pointer">🔍 Инспекция (Copilot)</button>
+    </div>`);
+  msg.querySelector(".gvis").onclick = (e) => geminiClassify(o, e.currentTarget);
+  msg.querySelector(".ginspect").onclick = () => copilot(o.asset ? `Проведи полную диагностику ${o.asset.tag}` : `Проведи техническую инспекцию объекта ${o.id} (${nameOf(o)}) в котельной.`);
+  proximity();
 }
 function onArrive() {
   status(`Arrived at ${target.asset.tag} — running diagnosis`);
@@ -308,6 +511,136 @@ function onArrive() {
   copilot();
 }
 $("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); copilot(q); };
+$("#gemini-hud").onclick = (e) => geminiScanScene(e.currentTarget);
+
+// ---------- Interactive 2D BIM Semantic Floor Layout
+const bimCanvas = $("#bim-canvas");
+const bctx = bimCanvas.getContext("2d");
+let bimLarge = false;
+$("#bim-btn").onclick = (e) => {
+  const show = $("#bim-panel").style.display === "none";
+  $("#bim-panel").style.display = show ? "" : "none";
+  e.currentTarget.setAttribute("aria-pressed", show);
+  if (show) drawBimMap();
+};
+$("#bim-size").onclick = (e) => {
+  bimLarge = !bimLarge;
+  bimCanvas.width = bimLarge ? 520 : 280;
+  bimCanvas.height = bimLarge ? 380 : 205;
+  e.currentTarget.textContent = bimLarge ? "− Компактно" : "⛶ Крупно";
+  drawBimMap();
+};
+function drawBimMap() {
+  if (!bimCanvas || $("#bim-panel").style.display === "none") return;
+  const W = bimCanvas.width, H = bimCanvas.height;
+  const sx = W / (G.w * G.cell), sz = H / (G.h * G.cell);
+  const wx = (x) => (x - G.origin[0]) * sx, wz = (z) => (z - G.origin[1]) * sz;
+  bctx.fillStyle = "#0e1118";
+  bctx.fillRect(0, 0, W, H);
+  // 1) Walkable BIM corridor vs obstacles
+  const cw = Math.ceil(G.cell * sx), ch = Math.ceil(G.cell * sz);
+  bctx.fillStyle = "#1d2432";
+  for (let j = 0; j < G.h; j++) for (let i = 0; i < G.w; i++) {
+    if (G.walkable[j * G.w + i] === "1") bctx.fillRect(Math.floor(i * G.cell * sx), Math.floor(j * G.cell * sz), cw, ch);
+  }
+  // 2) Semantic plant zones (subtle labels in large mode)
+  if (bimLarge) {
+    bctx.font = "600 10px system-ui"; bctx.fillStyle = "#ffffff30";
+    bctx.fillText("AREA-01 VESSELS & TANKS", 12, H - 14);
+    bctx.fillText("AREA-02 NORTH HEADER", W * 0.35, 16);
+    bctx.fillText("AREA-03 PUMP MANIFOLD", W - 135, H * 0.72);
+    bctx.fillText("AREA-04 SERVICE CORRIDOR", W * 0.34, H - 14);
+  }
+  // 3) Pipe & duct network + non-Excel equipment footprints
+  for (const o of objs) {
+    if (o.asset || (o.ai?.id ?? o.vision_id) === "STRUCTURE") continue;
+    const vid = o.ai?.id ?? o.vision_id ?? o.cls;
+    bctx.fillStyle = (vid === "PIPE" || vid === "DUCT") ? "#24547a99" : "#3a7ca8aa";
+    const x0 = wx(o.center[0] - o.size[0] / 2), z0 = wz(o.center[2] - o.size[2] / 2);
+    bctx.fillRect(x0, z0, Math.max(2, o.size[0] * sx), Math.max(2, o.size[2] * sz));
+  }
+  // 4) Mission path
+  bctx.save();
+  bctx.strokeStyle = "#ffd400cc"; bctx.lineWidth = bimLarge ? 2.2 : 1.6; bctx.setLineDash([4, 3]);
+  bctx.beginPath();
+  pts.forEach((p, idx) => { const x = wx(p.x), z = wz(p.z); if (idx === 0) bctx.moveTo(x, z); else bctx.lineTo(x, z); });
+  bctx.stroke();
+  bctx.restore();
+  // 5) Mapped Excel assets with condition color + tag labels
+  for (const o of objs) {
+    if (!o.asset) continue;
+    const col = o === target ? "#ff4d4d" : o.asset.condition_state === "healthy" ? "#3ecf6e" : "#f2b636";
+    const x0 = wx(o.center[0] - o.size[0] / 2), z0 = wz(o.center[2] - o.size[2] / 2);
+    const rw = Math.max(bimLarge ? 7 : 5, o.size[0] * sx), rh = Math.max(bimLarge ? 7 : 5, o.size[2] * sz);
+    bctx.fillStyle = col + "55"; bctx.strokeStyle = col; bctx.lineWidth = o === selected ? 2.2 : 1.3;
+    bctx.fillRect(x0, z0, rw, rh); bctx.strokeRect(x0, z0, rw, rh);
+    if (bimLarge || o === target || o === selected || o.asset.condition_state !== "healthy") {
+      bctx.font = `${o === target || o === selected ? "700" : "500"} ${bimLarge ? 10 : 8}px system-ui`;
+      bctx.fillStyle = o === target ? "#ff8080" : "#e6e8ec";
+      bctx.fillText(o.asset.tag, wx(o.center[0]) + 4, wz(o.center[2]) + 3);
+    }
+  }
+  // 6) Selected object highlight
+  if (selected) {
+    bctx.strokeStyle = "#ffffff"; bctx.lineWidth = 1.8;
+    bctx.beginPath(); bctx.arc(wx(selected.center[0]), wz(selected.center[2]), bimLarge ? 8 : 6, 0, Math.PI * 2); bctx.stroke();
+  }
+  // 7) Live technician radar + proximity circle + camera gaze cone
+  const ax = wx(avatar.position.x), az = wz(avatar.position.z);
+  bctx.strokeStyle = "#4ea1ff55"; bctx.lineWidth = 1;
+  bctx.beginPath(); bctx.arc(ax, az, RADIUS * sx, 0, Math.PI * 2); bctx.stroke();
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const ang = Math.atan2(dir.z, dir.x), coneR = bimLarge ? 26 : 16;
+  bctx.fillStyle = "#4ea1ff33";
+  bctx.beginPath(); bctx.moveTo(ax, az); bctx.arc(ax, az, coneR, ang - 0.5, ang + 0.5); bctx.closePath(); bctx.fill();
+  bctx.fillStyle = "#4ea1ff"; bctx.strokeStyle = "#fff"; bctx.lineWidth = 1.5;
+  bctx.beginPath(); bctx.arc(ax, az, bimLarge ? 5 : 4, 0, Math.PI * 2); bctx.fill(); bctx.stroke();
+}
+bimCanvas.addEventListener("click", (e) => {
+  const rect = bimCanvas.getBoundingClientRect();
+  const x = G.origin[0] + ((e.clientX - rect.left) / rect.width) * (G.w * G.cell);
+  const z = G.origin[1] + ((e.clientY - rect.top) / rect.height) * (G.h * G.cell);
+  let best = null, bestD = 0.55;
+  for (const o of objs) {
+    if (isNoise(o)) continue;
+    const d = Math.hypot(o.center[0] - x, o.center[2] - z) - (o.asset ? 0.08 : 0);
+    if (d < bestD) { bestD = d; best = o; }
+  }
+  if (best) select(best);
+});
+bimCanvas.addEventListener("dblclick", (e) => {
+  const rect = bimCanvas.getBoundingClientRect();
+  const x = G.origin[0] + ((e.clientX - rect.left) / rect.width) * (G.w * G.cell);
+  const z = G.origin[1] + ((e.clientY - rect.top) / rect.height) * (G.h * G.cell);
+  if (walkable(x, z)) {
+    playing = false; avatar.position.set(x, floorY, z);
+    if (mode === "walk") camera.position.set(x, floorY + EYE, z);
+    lastPx = NaN; proximity(); wake(1200);
+    status(`Teleported via BIM layout to (${x.toFixed(1)}, ${z.toFixed(1)})`);
+  }
+});
+
+// Allow clicking any 3D object frame directly in the 3D scene
+const raycaster = new THREE.Raycaster();
+let downPos = [0, 0];
+renderer.domElement.addEventListener("pointerdown", (e) => { downPos = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener("pointerup", (e) => {
+  if (mode === "walk" || Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]) > 5) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  let best = null, bestVol = Infinity;
+  for (const o of objs) {
+    if (!o.box.visible) continue;
+    const bmin = new THREE.Vector3(o.center[0] - o.size[0] / 2, o.center[1] - o.size[1] / 2, o.center[2] - o.size[2] / 2);
+    const bmax = new THREE.Vector3(o.center[0] + o.size[0] / 2, o.center[1] + o.size[1] / 2, o.center[2] + o.size[2] / 2);
+    if (raycaster.ray.intersectsBox(new THREE.Box3(bmin, bmax))) {
+      const vol = o.size[0] * o.size[1] * o.size[2];
+      if (vol < bestVol) { bestVol = vol; best = o; }
+    }
+  }
+  if (best) select(best);
+});
 
 // ---------- AI vision: CLIP in the browser (transformers.js) labels every 3D frame; results are saved on the server
 const VOC = await (await fetch("vocab.json")).json(); // model, classes, prompts, templates; shared with video_lift.py
@@ -317,19 +650,33 @@ const UNKNOWN = "Unidentified object";
 const sure = (o) => o.ai && o.ai.score >= MIN_SCORE;
 const nameOf = (o) => (!o.ai ? o.label : sure(o) ? o.ai.label : UNKNOWN); // shape guess only until vision has run
 function applyAI(o, r) {
+  if (!r) return;
   o.ai = r;
+  if (r.reason) o.reason = r.reason;
   o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (sure(o) ? `${r.label} ${Math.round(r.score * 100)}%` : UNKNOWN);
-  o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}% · shape guess: ${o.label}`;
-  if (r.kind === "clutter" && sure(o) && !o.asset) { // vision says "not equipment": fade the frame
-    o.box.material.color.set(0x555555);
-    o.box.material.opacity = 0.35;
+  o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}%${r.reason ? ` — ${r.reason}` : ""}`;
+  if (!o.asset && sure(o)) {
+    if (r.kind === "clutter") {
+      o.cls = "none";
+      o.lab.element.className = "label3d none";
+      o.box.material.color.set(0x555555);
+      o.box.material.opacity = 0.35;
+    } else if (r.kind === "equipment") {
+      o.cls = "info";
+      o.lab.element.className = "label3d info";
+      o.box.material.color.set(COLORS.info);
+      o.box.material.opacity = 0.9;
+    }
   }
 }
-// a sharp video tile beats a blurry splat render when the match is solid and the photo label is more confident
+// a sharp video tile beats a blurry splat render when the match is solid and the photo label is meaningfully more confident
 function decide(o) {
+  if (o.gemini && o.gemini.score >= MIN_SCORE) return o.gemini;
   if (o.video) return { ...o.video, source: `video, ${o.video.views} views` }; // option 2 (multi-view, sharp) wins
+  if (o.final && o.final.source) return o.final;
   const r = o.render, p = o.photo;
-  return p && p.csls >= SIM_MIN && p.score > r.score ? { ...p, source: "photo" } : { ...r, source: "render" };
+  const usePhoto = p && p.csls >= SIM_MIN && p.id && (p.id === r?.id || (p.score > (r?.score ?? 0) + 0.12 && !(r?.id === "STRUCTURE" && r?.score >= 0.35)));
+  return usePhoto ? { ...p, source: "photo" } : { ...r, source: "render" };
 }
 // labels from the last vision pass, saved by the server for this exact scene
 fetch("vision_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
@@ -337,10 +684,11 @@ fetch("vision_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
   for (const o of objs) {
     const c = v.labels[o.id];
     if (!c) continue;
-    Object.assign(o, { render: c.render, photo: c.photo });
+    Object.assign(o, { render: c.render, photo: c.photo, final: c.final, gemini: c.gemini });
     applyAI(o, decide(o));
   }
   lastNear = "";
+  if (!$("#chat").children.length) select(target);
 }).catch(() => {});
 // option 2 output (pipeline/video_lift.py on a GPU PC): multi-view labels + objects found only in the video
 fetch("video_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
@@ -372,7 +720,7 @@ for (let j = 0; j < G.h; j++) for (let i = 0; i < G.w; i++)
 const snap = Object.assign(document.createElement("canvas"), { width: 224, height: 224 });
 const sctx = snap.getContext("2d", { willReadFrequently: true });
 const capCam = new THREE.PerspectiveCamera(60, 1, 0.02, 50);
-const nextFrame = () => new Promise(requestAnimationFrame);
+const nextFrame = () => new Promise((r) => setTimeout(r, 12));
 let capturing = false;
 
 async function captureBox(o) {
@@ -402,7 +750,31 @@ async function captureBox(o) {
   const side = Math.min(Math.max((x1 - x0) * 1.8, (y1 - y0) * 1.8, H * 0.3), W, H); // context helps CLIP on small parts
   const cx = Math.min(Math.max((x0 + x1) / 2, side / 2), W - side / 2), cy = Math.min(Math.max((y0 + y1) / 2, side / 2), H - side / 2);
   sctx.drawImage(renderer.domElement, cx - side / 2, cy - side / 2, side, side, 0, 0, 224, 224);
+  return {
+    bx0: Math.round((x0 - (cx - side / 2)) / side * 224),
+    by0: Math.round((y0 - (cy - side / 2)) / side * 224),
+    bx1: Math.round((x1 - (cx - side / 2)) / side * 224),
+    by1: Math.round((y1 - (cy - side / 2)) / side * 224),
+  };
 }
+window.__app = { scene, camera, renderer, objs, captureBox, select, setMode, VOC, S, snap, sctx, labels, route, avatar };
+window.__captureBatch = async (ids) => {
+  capturing = true;
+  const hidden = [route, avatar, ...objs.map((x) => x.box)].map((m) => [m, m.visible]);
+  hidden.forEach(([m]) => (m.visible = false));
+  labels.domElement.style.visibility = "hidden";
+  const out = {};
+  for (const id of ids) {
+    const o = objs.find((x) => x.id === id);
+    if (!o) continue;
+    const rect = await captureBox(o);
+    out[id] = { b64: snap.toDataURL("image/jpeg", 0.88), rect };
+  }
+  hidden.forEach(([m, v]) => (m.visible = v));
+  labels.domElement.style.visibility = "";
+  capturing = false;
+  return out;
+};
 
 const MODEL = VOC.model;
 let TJS, vision, textModel, tokenizer, processor, clipDevice, textEmb;
@@ -543,7 +915,7 @@ $("#ai").onclick = async () => {
       if (bc >= SIM_MIN) Object.assign(o.photo, classify(t.e, protos)); // the sharp tile is already embedded
     });
     const matched = objs.filter((o) => o.photo.csls >= SIM_MIN);
-    objs.forEach((o) => applyAI(o, decide(o)));
+    objs.forEach((o) => { o.final = null; applyAI(o, decide(o)); });
     const saved = await fetch("api/vision", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scene_id: S.scene_id, model: MODEL, labels: Object.fromEntries(objs.filter((o) => o.render)
         .map((o) => [o.id, { render: o.render, photo: o.photo, final: o.ai }])) }) }).then((r) => r.ok).catch(() => false);
@@ -577,8 +949,9 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   if (capturing) return; // the vision pass owns the canvas
   stepMission(dt); stepWalk(dt); followCam(); proximity();
-  target.box.material.opacity = 0.55 + 0.45 * Math.sin(performance.now() / 200);
   if (orbit.enabled) orbit.update();
+  if (!playing && performance.now() > wakeUntil) return;
+  target.box.material.opacity = 0.55 + 0.45 * Math.sin(performance.now() / 200);
   if (playing) status(`En route to ${target.asset.tag} · ${avatar.position.distanceTo(pts.at(-1)).toFixed(1)} m left`);
   renderer.render(scene, camera); labels.render(scene, camera);
 });

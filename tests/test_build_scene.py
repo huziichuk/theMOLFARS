@@ -46,6 +46,33 @@ class PostgresBackend(unittest.TestCase):
         self.assertTrue(len(ctx["alarms"]) > 0)
         self.assertTrue(len(ctx["maintenance"]) > 0)
 
+    def test_vision_eval_benchmark_and_label_sync(self):
+        import json
+
+        root = Path(__file__).parents[1]
+        gt = json.loads((root / "tests" / "vision_eval.json").read_text())["labels"]
+        vl = json.loads((root / "web" / "vision_labels.json").read_text())["labels"]
+        sc = json.loads((root / "web" / "scene.json").read_text())
+        self.assertEqual(len(sc["objects"]), 414)
+        correct = sum(1 for oid, truth in gt.items() if vl[oid]["final"]["id"] == truth)
+        self.assertGreaterEqual(correct / len(gt), 0.75)
+        obj0 = sc["objects"][0]
+        self.assertEqual(obj0["cls"], "TANK")
+        self.assertEqual(obj0["vision_source"], "gemini-3.5-flash-lite")
+        self.assertTrue(len(obj0.get("reason", "")) > 10)
+        self.assertEqual(obj0["shape_label"], "Tank / cabinet")
+        obj2 = next(o for o in sc["objects"] if o["id"] == "OBJ-002")
+        self.assertEqual(obj2["vision_id"], "APPLIANCE")
+        self.assertIn("washing machine", obj2["label"].lower())
+
+        sys.path.insert(0, str(root))
+        import server  # noqa: E402
+
+        sctx = server.object_scene_context("OBJ-000")
+        self.assertIsNotNone(sctx)
+        self.assertEqual(sctx["object_id"], "OBJ-000")
+        self.assertEqual(sctx["specific_label"], "Diaphragm expansion vessel")
+
 
 if __name__ == "__main__":
     unittest.main()

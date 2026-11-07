@@ -11,15 +11,25 @@ import sys
 from pathlib import Path
 
 
+def find_ffmpeg():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        return shutil.which("ffmpeg")
+
+
 def main(video, outdir, fps="1"):
-    if not shutil.which("ffmpeg"):
-        sys.exit("ffmpeg not found on PATH")
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        sys.exit("ffmpeg not found on PATH (or install imageio-ffmpeg)")
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("*.jpg"):
         old.unlink()
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", video, "-vf", f"fps={fps},scale=960:-2",
-                    "-q:v", "3", str(out / "%04d.jpg")], check=True)
+    cmd = ["-v", "error", "-y", "-i", video, "-vf", f"fps={fps},scale=960:-2", "-q:v", "3", str(out / "%04d.jpg")]
+    if subprocess.run([ffmpeg, *cmd]).returncode != 0 and shutil.which("ffmpeg") and ffmpeg != shutil.which("ffmpeg"):
+        subprocess.run([shutil.which("ffmpeg"), *cmd], check=True)
     files = sorted(p.name for p in out.glob("*.jpg"))
     assert files, "ffmpeg produced no frames"
     # the browser caches tile embeddings under this hash, so frames from another video never reuse them

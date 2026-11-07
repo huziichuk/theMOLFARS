@@ -98,7 +98,12 @@ def selftest():
 def sample_frames(video, img_dir, fps):
     img_dir.mkdir(parents=True, exist_ok=True)
     if not any(img_dir.glob("*.jpg")):
-        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", f"fps={fps}", "-q:v", "2",
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except ImportError:
+            ffmpeg = "ffmpeg"
+        subprocess.run([ffmpeg, "-v", "error", "-i", str(video), "-vf", f"fps={fps}", "-q:v", "2",
                         str(img_dir / "%05d.jpg")], check=True)
     print(f"[frames] {len(list(img_dir.glob('*.jpg')))} frames")
 
