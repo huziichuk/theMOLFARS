@@ -10,19 +10,19 @@ We turn a raw 3D Gaussian Splatting scan of Valmet's Messukylä boiler/equipment
 4. **Diagnosis.** On arrival, a grounded AI copilot diagnoses the fault, citing exact evidence IDs.
 5. **Vision.** A client-side CLIP model, helped by the real walk-through video, relabels what each box actually is. Optionally, Google Gemini names each object (batch script or live buttons).
 
-![floor plan: walkable aisles (green), obstacles (red), 3D boxes (blue), target (red box), A* route (yellow)](web/floorplan.png)
+![The viewer: splat with 3D frames, BIM floor plan, proximity list and copilot](docs/viewer_screenshot.jpg)
 
 | Brief criterion (weight) | What we deliver |
 |---|---|
 | Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video; Gemini vision refines them (49/50 on our benchmark). An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
 | Obstacle-aware navigation & proximity (25%) | Floor/obstacle occupancy grid from the splat, an A* route with clearance cost, live 1.3 m proximity radius, and collision-checked first-person walk mode. |
-| AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`. |
-| Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose), and a static three.js + Spark viewer. |
-| Demo clarity (10%) | One-click mission (Start → walk → arrive → diagnosis), Follow / Orbit / Walk cameras, and real-photo asset cards. |
+| AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`; confidence drops with data-quality flags and a weak 3D identity (Builder Question Q-06); one click drafts a work order (Q-05). |
+| Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose, SQLite fallback) implementing every route of the pack's `API_Contract` sheet, and a static three.js + Spark viewer. |
+| Demo clarity (10%) | One-click mission (Start → walk → arrive → diagnosis → work-order draft), Follow / Orbit / Walk cameras, real-photo asset cards, 8 slides in `docs/`. |
 
 ## Quick start
 
-Requirements: Python ≥ 3.11, ffmpeg on PATH, Docker (for PostgreSQL), and a WebGPU browser (Chrome or Edge).
+Requirements: Python ≥ 3.11, ffmpeg on PATH (or `imageio-ffmpeg`), a WebGPU browser (Chrome or Edge), and optionally Docker for PostgreSQL.
 
 ```bash
 pip install -r requirements.txt
@@ -52,6 +52,8 @@ python pipeline/gemini_vision.py && python pipeline/build_scene.py data/equipmen
 
 Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) to get LLM answers. Without it the copilot returns a fully cited, templated evidence report. `DATABASE_URL` overrides the default `postgresql+psycopg://molfars:molfars@localhost:5432/molfars`.
 
+**No Docker?** Skip the two database lines. When PostgreSQL (or psycopg) is not available and `DATABASE_URL` is not set, `server.py` seeds `work/builder_pack.sqlite` from the same Excel file and runs the same SQL on it, so the demo never loses its copilot.
+
 ### Using the viewer
 - **▶ Start mission**: the avatar walks to the faulty pump P-005; the copilot diagnoses on arrival.
 - **Follow / Orbit / Walk (WASD, arrows)**: Walk mode collides with the nav grid.
@@ -61,10 +63,21 @@ Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) 
 - **Selecting an asset**: click a label or a proximity row. The card shows the 3D render and the matched real video photo, and you can ask the copilot about that asset.
 - **Open splat…**: views any `.ply/.spz/.splat` file.
 
+## Submission package (brief §07)
+
+| Deliverable | Where |
+|---|---|
+| Working demo, runnable locally | Quick start above; `python server.py` → http://localhost:8000 |
+| Source repository with README and setup | this repository |
+| 5–8 presentation slides | [docs/theMOLFARS_slides.pptx](docs/theMOLFARS_slides.pptx) (8 slides, speaker notes) and [PDF](docs/theMOLFARS_slides.pdf) |
+| Demo video (≤ 5 min) | to record from the running demo; the shot list is in [WORKFLOW §3](docs/WORKFLOW.md) |
+| Technical note | [TECH_NOTE.md](TECH_NOTE.md) |
+
 ## Documentation
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): architecture, every algorithm step, data formats and the HTTP API.
 - [docs/WORKFLOW.md](docs/WORKFLOW.md): the end-to-end workflow (data → pipeline → demo), the GPU option, a demo script, the decisions log and the tools we used.
 - [TECH_NOTE.md](TECH_NOTE.md): models, libraries and versions.
+- [docs/theMOLFARS_slides.pptx](docs/theMOLFARS_slides.pptx): the 8-slide deck (pipeline, extraction, navigation, mapping, copilot, architecture, demo).
 
 ## Repository layout
 
@@ -74,14 +87,14 @@ pipeline/
   extract_frames.py   walk-through video -> web/frames/*.jpg + index.json
   video_lift.py       (GPU PC) COLMAP + CLIP-L + OWLv2 multi-view labels and new objects -> web/video_labels.json
   gemini_vision.py    Gemini labels for every box from contact sheets of crops -> web/vision_labels.json
-server.py             FastAPI: serves web/ + asset / vision / Gemini vision / copilot API over PostgreSQL
+server.py             FastAPI: serves web/ + the pack's API_Contract routes, vision, copilot, work-order drafts
 seed_db.py            loads the Excel pack into PostgreSQL (14 sheets -> tables + indexes)
 docker-compose.yml    PostgreSQL 16 for the server
 web/
   index.html          three.js + Spark viewer, mission, proximity UI, copilot chat, in-browser CLIP vision
   scene.json          pipeline output (objects, grid, route, mapping)
   floorplan.png       debug/slide image of grid + boxes + route
-docs/                 documentation and figures
+docs/                 documentation, figures, slides (.pptx + .pdf)
 inputs/ml_segment/    boxes from the team's ml branch (Open3D segment.py), for build_scene.py --boxes
 web/vocab.json        CLIP model, classes, prompts, templates (shared by the browser pass and video_lift.py)
 web/prototype_tiles.json   hand-labelled video tiles used as visual class prototypes
@@ -96,14 +109,15 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 |---|---|
 | Splats | 1,676,481, all valid; the viewer gets 621,845 surface splats without view-dependent colour (35 MB instead of 396 MB) |
 | Room height | floor y −1.17, ceiling y 0.87 (2.04 scan units) |
-| Nav grid | 97×83 cells of 10 cm; 1,431 walkable |
+| Nav grid | 97×83 cells of 10 cm; 2,276 walkable (+59% after measuring clearance to the real splats; the rest of the floor is clutter or gaps narrower than 0.44 m) |
 | Segmentation | 414 framed objects |
-| Excel mapping | all 30 assets on boxes vision reads as pump / motor / valve / gauge / sensor, placed by a size-and-class fit score; target ASSET-017 / P-005 on OBJ-048 (a pump) |
-| Route | 9.3 m, 32 waypoints |
+| Excel mapping | all 30 assets on boxes vision reads as pump / motor / valve / gauge / sensor, placed by a size-and-class fit score; target ASSET-017 / P-005 on OBJ-115, a reachable box vision reads as a pump |
+| Route | 8.9 m, 11 waypoints, along the equipment wall; ≥ 0.224 m from every obstacle splat |
 | Vision, CLIP only (B/16, prompt ensemble) | 302 / 414 boxes labelled ≥ 0.4 |
 | Vision, saved labels (CLIP + refinement rules + Gemini) | 401 boxes labelled by Gemini, 13 by rules; **49 / 50** on the benchmark (see the caveats in HOW_IT_WORKS §2.3) |
 | Vision benchmark (50 hand-labelled crops) | old setup 30% → **66%** correct; 74% precision on the labels actually shown |
-| Copilot | offline evidence report verified for all 30 assets on the earlier stdlib server; the FastAPI + PostgreSQL version is covered by `tests` (`PostgresBackend`, needs a seeded database) |
+| Copilot | offline evidence report verified for all 30 assets; for P-005 the overall confidence is 0.43 (model 0.91, 9 data-quality flags, 3D identity 0.55); covered by `tests` (`PostgresBackend`, runs on PostgreSQL or the SQLite fallback) |
+| Proximity along the route | 14 Excel assets enter the 1.3 m radius before the target, among them M-006 (attention required), P-001, M-004, M-005 (degraded), M-001, P-004, CV-007, M-003 (watch) and 6 healthy |
 
 ## Known limits
 - **The Gemini path of the copilot needs `GEMINI_API_KEY`** and was not exercised while writing these docs. The offline evidence path is the fallback on any API error.

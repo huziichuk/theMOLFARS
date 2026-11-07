@@ -33,6 +33,31 @@ class Sanitize(unittest.TestCase):
         self.assertEqual(len(B.sanitize(r, P)), 3400)
 
 
+class NavGrid(unittest.TestCase):
+    """A person (radius 0.22 m) must pass a 0.6 m gap in a wall and must not pass a 0.3 m one."""
+
+    @staticmethod
+    def room_with_gap(gap):
+        g = np.arange(-1.5, 1.5, 0.03)
+        fx, fz = np.meshgrid(g, g)
+        floor = np.c_[fx.ravel(), np.zeros(fx.size), fz.ravel()]
+        wx, wy = np.meshgrid(np.arange(-1.5, 1.5, 0.02), np.arange(0.3, 1.5, 0.05))
+        keep = np.abs(wx.ravel()) > gap / 2
+        wall = np.c_[wx.ravel()[keep], wy.ravel()[keep], np.zeros(keep.sum())]
+        w = np.r_[floor, wall]
+        return B.build_grid(w, np.ones(len(w)), 0.0)
+
+    def both_sides_walkable(self, g):
+        zs = (np.nonzero(g["walk"])[1] + 0.5) * B.CELL + g["origin"][1]
+        return (zs < -0.4).any() and (zs > 0.4).any()
+
+    def test_wide_gap_connects_both_halves(self):
+        self.assertTrue(self.both_sides_walkable(self.room_with_gap(0.6)))
+
+    def test_narrow_gap_does_not(self):
+        self.assertFalse(self.both_sides_walkable(self.room_with_gap(0.3)))
+
+
 class AssetMapping(unittest.TestCase):
     def test_worst_asset_goes_to_the_box_that_fits_never_to_a_wall(self):
         import tempfile
@@ -94,6 +119,20 @@ class PostgresBackend(unittest.TestCase):
 
         self.assertEqual(asyncio.run(call(b"text/plain")).status_code, 415)
         self.assertEqual(asyncio.run(call(b"application/json")), "passed")
+
+    def test_confidence_drops_with_data_quality_flags_and_weak_identity(self):
+        # Builder question Q-06: poor sensor data or a weak 3D mapping must lower the confidence we show
+        sys.path.insert(0, str(Path(__file__).parents[1]))
+        import server  # noqa: E402
+
+        self.addCleanup(server.engine.dispose)
+        clean = server.trust(0.9, [], {"id": "OBJ-1", "vision_score": 0.95})
+        flagged = server.trust(0.9, [{"severity": "high"}, {"severity": "medium"}], {"id": "OBJ-1", "vision_score": 0.95})
+        unmapped = server.trust(0.9, [], None)
+        self.assertEqual(clean["overall"], 0.9)
+        self.assertEqual(flagged["after_data_quality"], round(0.9 * 0.85 * 0.93, 2))
+        self.assertLess(flagged["overall"], clean["overall"])
+        self.assertEqual(unmapped["overall"], 0.0)  # no 3D box: we cannot say which device it is
 
     def test_object_scene_context_matches_scene(self):
         sys.path.insert(0, str(Path(__file__).parents[1]))

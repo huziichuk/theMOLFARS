@@ -17,7 +17,7 @@
 | Photo matching | CLIP tile embeddings + CSLS hubness-corrected nearest neighbour; Cache API | | browser |
 | Gemini vision | `gemini-3.5-flash-lite` multimodal: batch contact sheets (`gemini_vision.py`), one object and current view (`/api/vision/gemini*`); JSON output constrained to the `vocab.json` classes | needs `GEMINI_API_KEY` | `pipeline/gemini_vision.py`, `server.py` |
 | Label refinement | `refine_vision`: render/photo fusion + geometry and room-specific rules; `asset_fit_score` for the Excel mapping | | `build_scene.py` |
-| Data store | PostgreSQL 16 (Docker Compose), seeded from the Excel pack by `seed_db.py` (14 tables, indexed) | `postgres:16-alpine` | `docker-compose.yml`, `seed_db.py` |
+| Data store | PostgreSQL 16 (Docker Compose), seeded from the Excel pack by `seed_db.py` (14 tables, indexed); SQLite fallback seeded the same way when PostgreSQL is not reachable | `postgres:16-alpine` | `docker-compose.yml`, `seed_db.py`, `server.py` |
 | Copilot retrieval | Deterministic relational retrieval, parameterised SQL via SQLAlchemy + psycopg 3, pandas | | `server.py` |
 | LLM | Google Gemini `gemini-3.5-flash-lite` via the `google-genai` SDK; offline evidence template without a key or on API errors | | `server.py` |
 | Server | FastAPI + uvicorn, static files via `StaticFiles`; config from `.env` (python-dotenv) | | `server.py` |

@@ -57,7 +57,8 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 ### 1.3 Navigation grid (10 cm cells)
 - **Observed floor** = cells with splats within ±12 cm of the floor height. A binary closing (4 iterations) and hole filling close gaps.
 - **Obstacles** = cells with opaque splats between floor + 0.2 m and floor + 1.7 m (head height). A cell counts if it has ≥ 4 hits after a morphological opening, or ≥ 12 hits on its own.
-- **Inflation:** obstacles are dilated by the avatar radius (0.22 m).
+- **Clearance:** a cell is blocked when any splat of an obstacle cell lies closer than the avatar radius (0.22 m) to the cell centre (k-d tree over the obstacle splats). Distances go to the real splats, not to whole 10 cm cells: the cell-based test made every gap 10–15 cm narrower than it is and cut the corridor along the equipment wall (a 0.9 m gap between an insulated pipe bend and a shelf) off from the rest of the room.
+- **Result:** 2,276 walkable cells (1,431 with the first, dilation-based margin: +59%) for the same 0.22 m person radius. The rest of the floor is shelves, boxes, carts and machines, or gaps narrower than 0.44 m. The route keeps ≥ 0.224 m from every obstacle splat (checked every 2 cm). `tests` has a wall with a 0.6 m gap (passable) and a 0.3 m gap (not).
 - **Walkable** = observed floor ∧ ¬inflated obstacle, keeping only the largest connected component.
 - A clearance map (Euclidean distance transform) is kept for path costs.
 
@@ -93,12 +94,12 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
   - boxes vision reads as wall, pipe, duct, lamp, box, chair, ladder, cart or appliance are never used, and thin flakes (< 4 cm) or slabs (> 1.05 m) are pushed to the end.
 
   Assets of the same class are interchangeable to this score, so a rebuild can swap tags between boxes of one class (we saw 11 swaps); the classes and the target stay the same.
-- **Target placement:** the target asset is moved onto a reachable object of exactly its class (≤ 1.3 m from an aisle, because pumps are wall-mounted). If none exists, a compatible class is used (≤ 1.0 m), then any equipment box (≤ 2.0 m). If even that is empty, the pipeline stops with a clear message. Among the candidates it picks one far from the start, but not the very edge of the scan. If no box received the target asset during mapping, the box gets the full Master + Current_State record, so health and status are always present.
+- **Target placement:** the target asset is moved onto a reachable object of exactly its class (≤ 1.3 m from an aisle, because pumps are wall-mounted). If none exists, a compatible class is used (≤ 1.0 m), then any equipment box (≤ 2.0 m). If even that is empty, the pipeline stops with a clear message. Among the candidates that really look like the device (its class, seen by vision, right size: fit score ≥ 8.5; all candidates if none does) it picks one far from the start, but not the very edge of the scan, so the walk passes more of the room. If no box received the target asset during mapping, the box gets the full Master + Current_State record, so health and status are always present.
 
 ### 1.6 Route
 - The start is the walkable cell nearest the left edge of the scan. The goal is the walkable cell nearest the target box.
 - **8-connected A\*** with no corner cutting. Step cost `c · (1 + 1.5 / (0.2 + clearance))`, so the path stays in the middle of aisles.
-- **String-pulling:** the route is shortened by line of sight, but only through cells with ≥ 15 cm clearance.
+- **String-pulling:** the route is shortened by line of sight through walkable cells only (they already carry the avatar radius).
 - Self-checks: the route must exist and every cell on it must be walkable (`assert`).
 
 ### 1.7 `scene.json` format
@@ -107,12 +108,12 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
   "splat": "boiler_room_clean.ply", "frame": "rotate_x_180",
   "floor_y": -1.17, "ceiling_y": 0.87,
   "grid": { "origin": [x0, z0], "cell": 0.1, "w": 97, "h": 83, "walkable": "0101…" }, // row-major by z
-  "objects": [{ "id": "OBJ-048", "cls": "PROCESS_PUMP", "label": "Circulation / centrifugal pump",
+  "objects": [{ "id": "OBJ-115", "cls": "PROCESS_PUMP", "label": "Circulation / centrifugal pump",
                 "shape_label": "…",               // the geometry guess before vision
                 "vision_id": "PUMP", "vision_score": 0.58, "vision_source": "gemini-3.5-flash-lite", "reason": "…",
                 "center": [x, y, z], "size": [sx, sy, sz], "color": [r, g, b],
                 "asset": { "asset_id": "ASSET-017", "tag": "P-005", "condition_state": "…", "health_score": 44, … } | null }],
-  "target_object": "OBJ-048", "target_asset": "ASSET-017",
+  "target_object": "OBJ-115", "target_asset": "ASSET-017",
   "path": [[x, y, z], …],
   "scene_id": "9dd32119e0b1"   // SHA-1 of the box geometry; object IDs are valid only for these boxes
 }
@@ -229,6 +230,7 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
 - `docker compose up -d` starts PostgreSQL 16 (`molfars-postgres`, port 5432; user, password and database default to `molfars`, overridable via `POSTGRES_*`).
 - `seed_db.py` loads 14 sheets of the Excel pack into same-named lower-case tables. It replaces them on every run and adds indexes on `asset_id`, timestamps, `(asset_class, issue_code)` and `(doc_id, scope)`.
 - `server.py` connects through SQLAlchemy + psycopg (`DATABASE_URL`, default `postgresql+psycopg://molfars:molfars@localhost:5432/molfars`) and reads `.env` with python-dotenv.
+- **Fallback:** if that connection fails and `DATABASE_URL` is not set, `seed_db.seed()` writes the same 14 tables into `work/builder_pack.sqlite` (rebuilt when the Excel file is newer) and the server uses it. All queries are plain SQL that both databases run. With an explicit `DATABASE_URL` the server fails loudly instead.
 - The pipeline (`build_scene.py`) still reads the Excel file directly for the asset mapping.
 
 ### HTTP API (FastAPI, uvicorn on 127.0.0.1)
@@ -240,7 +242,12 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
 | POST | `/api/vision` | `{scene_id, model, labels}` → writes `web/vision_labels.json` (scene_id must match `scene.json`, IDs `ABC-123`, ≤ 5 MB, atomic write) |
 | POST | `/api/vision/gemini` | `{object_id, render_b64?, photo?}` → `{object_id, result}`; needs a key (503 without), 502 on a Gemini error |
 | POST | `/api/vision/gemini-scene` | `{view_b64, candidates?}` → `{detections, updated}` |
-| POST | `/api/copilot` | `{asset_id \| object_id, question?, history?}` → `{mode, answer}`. `object_id` is for boxes with no Excel asset: Gemini gets the vision label, size, height and the 4 nearest registered assets |
+| GET | `/api/assets/{asset_id}/telemetry` | every telemetry row of the asset, oldest first; 404 if unknown |
+| GET | `/api/assets/{asset_id}/events` | its last 50 alarms/events |
+| GET | `/api/assets/{asset_id}/documents` | RAG-ready knowledge: its asset card, its class guidance and the site-wide docs (`RAG_Corpus_Index` + `Knowledge_Docs` text) |
+| GET | `/api/scene/anchors` | `Scene_Anchors` rows, each with the real 3D box it was mapped to (`object_id`, centre, size, vision class, identity confidence, `scene_id`) |
+| POST | `/api/copilot` (also `/api/copilot/query`) | `{asset_id \| object_id, question?, history?}` → `{mode, answer}`. `object_id` is for boxes with no Excel asset: Gemini gets the vision label, size, height and the 4 nearest registered assets |
+| POST | `/api/work-orders/draft` | `{asset_id}` → a work-order **draft** in the `Maintenance_History` shape: priority from urgency, action, numbered steps (lockout first, cases, doc, data-quality checks), evidence IDs, confidence. Nothing is stored or sent |
 | GET | `/health` | `{status: "ok"}` |
 
 ### Retrieval (deterministic and relational)
@@ -254,6 +261,9 @@ There are only 30 assets, so we use no vector store. For the asset ID the server
 - `Knowledge_Docs` and `Data_Quality` flags.
 
 The result is about 11 k characters of JSON, and every row keeps its evidence ID.
+
+### Confidence (Builder Question Q-06)
+Every context carries `confidence`: the pack's `model_confidence`, scaled down by each open data-quality flag of the asset (high ×0.85, medium ×0.93, low ×0.97), and the 3D identity (the vision score of the box the asset was mapped to). The overall value is the lower of the two: a diagnosis is only as sure as the data behind it and the certainty that this box is that device. For P-005: 0.91 → 0.43 after 9 flags; identity 0.55; overall 0.43. The offline report prints the breakdown; Gemini is told to state it and say why it is lower.
 
 ### Generation
 - **With `GEMINI_API_KEY` (or `GOOGLE_API_KEY`):** Google Gemini `gemini-3.5-flash-lite` through the `google-genai` SDK, up to 2,000 output tokens; the evidence context goes into the system instruction and the chat history is passed as turns. The system prompt requires 4 sections: *what is wrong*, *why*, *safe next steps (lockout first)* and *data trust*. Every claim must cite IDs (`Builder_Questions` Q-03), and the model may answer only from the context.

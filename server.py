@@ -35,7 +35,30 @@ MODEL = "gemini-3.5-flash-lite"
 MAX_BODY = 5_000_000
 ROOM_NOTE = json.loads((ROOT / "web" / "vocab.json").read_text())["room_note"]  # one description of the room for every Gemini prompt
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
+
+
+def make_engine():
+    """PostgreSQL when it is up. Without an explicit DATABASE_URL, a missing Docker or psycopg must not kill the demo:
+    fall back to SQLite seeded from the same Excel pack (same tables, same SQL)."""
+    try:
+        eng = create_engine(DB_URL, pool_pre_ping=True)
+        with eng.connect():
+            return eng
+    except Exception as e:
+        if "DATABASE_URL" in os.environ:
+            raise
+        print(f"[db] PostgreSQL unavailable ({type(e).__name__}); using SQLite seeded from data/builder_pack.xlsx")
+    import seed_db
+
+    db = ROOT / "work" / "builder_pack.sqlite"
+    if not db.exists() or db.stat().st_mtime < seed_db.DEFAULT_XLSX.stat().st_mtime:
+        db.parent.mkdir(exist_ok=True)
+        db.unlink(missing_ok=True)
+        seed_db.seed(db_url=f"sqlite:///{db}")
+    return create_engine(f"sqlite:///{db}")
+
+
+engine = make_engine()
 
 
 def records(df, n=None):
@@ -102,15 +125,46 @@ def asset_context(asset_id: str) -> dict:
         for c, s in ((c, num[c].dropna()) for c in num.columns)
         if len(s)
     }
+    dq_records = records(dq)
+    state_rec = records(state)[0]
     return dict(
         asset=records(master)[0],
-        state=records(state)[0],
+        state=state_rec,
         telemetry_trend_3d=trend,
         alarms=records(alarms[alarms.severity.isin(["high", "critical", "medium"])], 10) or records(alarms, 10),
         maintenance=records(maint, 8),
         similar_cases=cases_records,
         docs=records(docs),
-        data_quality=records(dq),
+        data_quality=dq_records,
+        confidence=trust(state_rec["model_confidence"], dq_records, scene_box(asset_id)),
+    )
+
+
+DQ_PENALTY = {"high": 0.15, "medium": 0.07, "low": 0.03}
+URGENCY_PRIORITY = {"high": "high", "medium": "medium", "routine": "low"}  # Current_State.urgency -> Maintenance_History.priority
+
+
+def scene_box(asset_id: str) -> dict | None:
+    """The 3D box this asset was mapped onto (web/scene.json), or None."""
+    scene = json.loads((ROOT / "web" / "scene.json").read_text())
+    return next((o for o in scene["objects"] if (o.get("asset") or {}).get("asset_id") == asset_id), None)
+
+
+def trust(model_confidence, dq: list, box: dict | None) -> dict:
+    """Builder question Q-06: lower the confidence when sensor data or the 3D mapping is poor.
+    Every open data-quality flag scales the model confidence down; the overall value is the weakest link
+    of that and the 3D identity (how sure vision is that the box really is this kind of device)."""
+    data = float(model_confidence)
+    for q in dq:
+        data *= 1 - DQ_PENALTY.get(q.get("severity"), 0.07)
+    identity = float(box.get("vision_score", 0.5)) if box else 0.0
+    return dict(
+        model=round(float(model_confidence), 2),
+        after_data_quality=round(data, 2),
+        data_quality_flags=len(dq),
+        identity_3d=round(identity, 2),
+        object_id=box["id"] if box else None,
+        overall=round(min(data, identity), 2),
     )
 
 
@@ -121,7 +175,7 @@ On arrival give a compact report with 4 headed sections:
 1. What is wrong — diagnosis, health score, model confidence, abnormal telemetry (first -> last).
 2. Why — linked alarms and maintenance history.
 3. What to do next — numbered, safe inspection steps (lockout/permit first) from cases and docs.
-4. Data trust — data-quality flags the technician must verify; overall confidence.
+4. Data trust — data-quality flags the technician must verify; give `confidence.overall` from the CONTEXT and say why it is lower than the model confidence.
 Keep it under 250 words. Answer in the language of the user's question."""
 
 
@@ -186,6 +240,12 @@ def offline_report(ctx, question):
         f"- [{q['issue_id']}] {q['issue_type']} ({q['severity']}) in {q['source_sheet']} → {q['recommended_handling']}"
         for q in ctx["data_quality"]
     ] or ["- No data-quality flags."]
+    cf = ctx["confidence"]
+    where = f" (`[{cf['object_id']}]`)" if cf["object_id"] else " (not mapped to a 3D box)"
+    out.append(
+        f"- **Overall confidence {cf['overall']:.2f}**: model {cf['model']:.2f} -> {cf['after_data_quality']:.2f} after "
+        f"{cf['data_quality_flags']} data-quality flag(s); 3D identity {cf['identity_3d']:.2f}{where}; the lower one counts."
+    )
     if question and not question.startswith("ARRIVED"):
         out += ["", f"_Offline mode: free-form question “{question}” needs an LLM — set GEMINI_API_KEY. Evidence above._"]
     return "\n".join(out)
@@ -213,6 +273,79 @@ def get_asset(asset_id: str):
         return asset_context(asset_id)
     except KeyError:
         return JSONResponse(status_code=404, content={"error": "unknown asset"})
+
+
+def asset_rows(sql: str, asset_id: str, n: int | None = None):
+    """Rows of one asset's table, oldest first; 404 for an unknown asset (API_Contract routes)."""
+    with engine.connect() as conn:
+        if pd.read_sql(text("SELECT 1 FROM asset_master WHERE asset_id = :aid"), conn, params={"aid": asset_id}).empty:
+            return JSONResponse(status_code=404, content={"error": "unknown asset"})
+        return records(pd.read_sql(text(sql), conn, params={"aid": asset_id}), n)
+
+
+@app.get("/api/assets/{asset_id}/telemetry")
+def asset_telemetry(asset_id: str):
+    return asset_rows("SELECT * FROM telemetry_sample_3d WHERE asset_id = :aid ORDER BY timestamp", asset_id)
+
+
+@app.get("/api/assets/{asset_id}/events")
+def asset_events(asset_id: str):
+    return asset_rows("SELECT * FROM alarms_events WHERE asset_id = :aid ORDER BY timestamp", asset_id, 50)
+
+
+@app.get("/api/assets/{asset_id}/documents")
+def asset_documents(asset_id: str):
+    """RAG-ready knowledge: this asset's card, its class guidance and site-wide docs, with the text when the pack has it."""
+    return asset_rows(
+        "SELECT r.*, k.title, k.content FROM rag_corpus_index r LEFT JOIN knowledge_docs k ON k.doc_id = r.doc_id "
+        "WHERE r.asset_id = :aid OR (r.asset_id IS NULL AND r.scope IN ('ALL', (SELECT asset_class FROM asset_master WHERE asset_id = :aid)))",
+        asset_id,
+    )
+
+
+@app.get("/api/scene/anchors")
+def scene_anchors():
+    """Scene_Anchors from the pack, plus the real 3D box each asset was mapped to and how sure that identity is."""
+    with engine.connect() as conn:
+        anchors = records(pd.read_sql(text("SELECT * FROM scene_anchors ORDER BY asset_id"), conn))
+    scene = json.loads((ROOT / "web" / "scene.json").read_text())
+    boxes = {o["asset"]["asset_id"]: o for o in scene["objects"] if o.get("asset")}
+    for a in anchors:
+        o = boxes.get(a["asset_id"])
+        a["scene_object"] = o and dict(object_id=o["id"], center_m=o["center"], size_m=o["size"], vision_id=o.get("vision_id"),
+                                       identity_confidence=o.get("vision_score"), scene_id=scene["scene_id"])
+        if o:
+            a["mapping_status"] = "mapped_to_scan_box"
+    return anchors
+
+
+@app.post("/api/work-orders/draft")
+async def work_order_draft(request: Request):
+    """Q-05: 3D object -> evidence -> service case -> work-order DRAFT. Nothing is written or sent; no control actions."""
+    try:
+        ctx = asset_context(str((await read_json_body(request))["asset_id"]))
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "known asset_id required"})
+    a, st = ctx["asset"], ctx["state"]
+    steps = ["Obtain permit, apply lockout/tagout, confirm asset identity on site (QR/NFC)."]
+    steps += [f"{c['recommended_next_check'].capitalize()} [{c['case_id']}]" for c in ctx["similar_cases"][:2]]
+    steps += [f"Follow [{d['doc_id']}]" for d in ctx["docs"][:1]]
+    steps += [f"Verify data-quality flag [{q['issue_id']}] {q['issue_type']}" for q in ctx["data_quality"][:3]]
+    return dict(
+        status="draft_not_submitted",
+        work_order_id=None,  # the maintenance system assigns it when a person submits the draft
+        asset_id=a["asset_id"], tag=a["tag"], area_name=a["area_name"],
+        maintenance_type="inspection" if st["condition_state"] == "healthy" else "corrective",
+        priority=URGENCY_PRIORITY.get(str(st["urgency"]).lower(), "medium"),
+        action=st["recommended_next_check"],
+        issue_code=st["issue_code"], issue_summary=st["issue_summary"],
+        role="field_technician",
+        knowledge_doc_id=st["knowledge_doc_id"],
+        steps=steps,
+        evidence=[e["event_id"] for e in ctx["alarms"][-5:]] + [w["work_order_id"] for w in ctx["maintenance"][-3:]]
+        + [c["case_id"] for c in ctx["similar_cases"][:2]] + [q["issue_id"] for q in ctx["data_quality"]],
+        confidence=ctx["confidence"],
+    )
 
 
 @app.post("/api/vision")
@@ -514,7 +647,7 @@ def ask_gemini_scene_object(client: genai.Client, octx: dict, history: list, que
         f"{ROOM_NOTE} "
         "Use the Gemini Vision classification, 3D physical measurements, elevation, and nearby registered assets to provide a practical assessment "
         "(what the object is, its visual/physical traits, whether it is industrial equipment or a room/utility item, safety/housekeeping or inspection notes, and relationship to nearby assets). "
-        f"Reply in the language of the user's question (Russian if asked in Russian).\n\nOBJECT CONTEXT:\n{json.dumps(octx, ensure_ascii=False)}"
+        f"Reply in the language of the user's question.\n\nOBJECT CONTEXT:\n{json.dumps(octx, ensure_ascii=False)}"
     )
     contents = []
     for m in history:
@@ -530,6 +663,7 @@ def ask_gemini_scene_object(client: genai.Client, octx: dict, history: list, que
 
 
 @app.post("/api/copilot")
+@app.post("/api/copilot/query")  # the route name in the pack's API_Contract sheet
 async def copilot(request: Request):
     try:
         req = await read_json_body(request)

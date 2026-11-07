@@ -64,16 +64,16 @@
     <button data-mode="orbit">Orbit</button>
     <button data-mode="walk">Walk (WASD)</button>
     <button id="all" aria-pressed="false">All frames</button>
-    <button id="bim-btn" aria-pressed="true">🗺️ BIM План</button>
+    <button id="bim-btn" aria-pressed="true">🗺️ BIM plan</button>
     <button id="ai">AI labels (CLIP)</button>
-    <button id="gemini-hud" style="border-color:var(--acc);color:var(--acc)">✨ Gemini Скан вида</button>
+    <button id="gemini-hud" style="border-color:var(--acc);color:var(--acc)">✨ Gemini scan view</button>
     <label>Open splat… <input id="file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" hidden></label>
   </div>
   <div id="gscan-overlay"></div>
   <div id="bim-panel">
     <div id="bim-head">
-      <span><b>BIM SEMANTIC FLOOR LAYOUT</b> · клик — актив, 2×клик — телепорт</span>
-      <button id="bim-size" type="button">⛶ Крупно</button>
+      <span><b>BIM SEMANTIC FLOOR LAYOUT</b> · click: select asset, double-click: teleport</span>
+      <button id="bim-size" type="button">⛶ Enlarge</button>
     </div>
     <canvas id="bim-canvas" width="280" height="205"></canvas>
     <div id="bim-legend">
@@ -343,7 +343,7 @@ function proximity() {
   if (key === lastNear) return;
   lastNear = key;
   $("#nearby").innerHTML = near.map(([d, o]) => {
-    const tagChip = o.asset ? (o === target ? "FAULT" : o.asset.condition_state) : (o.ai?.id ?? o.vision_id ?? o.cls ?? "SCENE");
+    const tagChip = o.asset ? `${o === target ? "FAULT" : o.asset.condition_state} · ${o.asset.health_score}` : (o.ai?.id ?? o.vision_id ?? o.cls ?? "SCENE");
     return `<li data-id="${o.id}"><span>${o.asset ? `<b>${o.asset.tag}</b> ` : `<code style="font-size:11px;color:var(--mute)">${o.id}</code> `}${esc(nameOf(o))}</span>
     <span><span class="chip ${esc(o.cls)}">${esc(tagChip)}</span> ${d.toFixed(1)}</span></li>`;
   }).join("")
@@ -368,7 +368,7 @@ async function copilot(question) {
   const wait = say("bot", "…Gemini Copilot analysing industrial object");
   const payload = selected.asset
     ? { asset_id: selected.asset.asset_id, question, history: h }
-    : { object_id: selected.id, question: question ?? "Проведи техническую инспекцию этого промышленного объекта в котельной (назначение, параметры, на что обратить внимание).", history: h };
+    : { object_id: selected.id, question: question ?? "Inspect this object in the boiler room: what it is, its key parameters, and what a technician should check.", history: h };
   const r = await fetch("api/copilot", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload) })
     .then((r) => r.json()).catch((e) => ({ error: `Copilot unavailable: ${e.message}` }));
@@ -402,11 +402,11 @@ async function geminiClassify(o, btn) {
     capturing = false;
     say("bot", `Gemini Vision unavailable: ${e.message}`);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini Vision (Объект)"; }
+    if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini Vision (object)"; }
   }
 }
 async function geminiScanScene(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = "…Сканирование вида"; }
+  if (btn) { btn.disabled = true; btn.textContent = "…Scanning view"; }
   const overlay = $("#gscan-overlay");
   overlay.innerHTML = "";
   try {
@@ -470,7 +470,7 @@ async function geminiScanScene(btn) {
       }
       setTimeout(() => { overlay.innerHTML = ""; }, 9000);
       const summary = r.detections.map((d) => `- ${d.object_id ? `**[${d.object_id}]** ` : ""}**${d.label}** (\`${d.id}\`, ${Math.round(d.score * 100)}%): _${d.reason}_`).join("\n");
-      say("bot", `✨ **Gemini Vision — Скан текущего вида (${r.detections.length} пром. объектов):**\n${summary || "Объекты не обнаружены"}`);
+      say("bot", `✨ **Gemini Vision — current view (${r.detections.length} objects):**\n${summary || "No objects detected"}`);
     } else {
       say("bot", `Gemini scan error: ${r.error ?? "unknown"}`);
     }
@@ -478,39 +478,53 @@ async function geminiScanScene(btn) {
     capturing = false;
     say("bot", `Gemini scan unavailable: ${e.message}`);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini Скан вида"; }
+    if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini scan view"; }
   }
 }
 function select(o) {
   if (!o) return;
   selected = o; history = [];
-  $("#q").placeholder = o.asset ? `Ask about ${o.asset.tag}…` : `Спросить Gemini про ${nameOf(o)} [${o.id}]…`;
+  $("#q").placeholder = o.asset ? `Ask about ${o.asset.tag}…` : `Ask Gemini about ${nameOf(o)} [${o.id}]…`;
   const r = o.ai || {};
   const reason = r.reason || o.reason || "";
   const elev = (o.center[1] - o.size[1] / 2 - floorY).toFixed(2);
   const dims = `${o.size[0].toFixed(2)}×${o.size[1].toFixed(2)}×${o.size[2].toFixed(2)} m (h=${elev} m)`;
   const head = o.asset
     ? `Selected **${o.asset.tag}** [${o.asset.asset_id}] — **${nameOf(o)}** (${o.asset.asset_class}, ${o.asset.condition_state}, health ${o.asset.health_score}).`
-    : `Selected **[${o.id}] ${nameOf(o)}** — класс \`${r.id ?? o.vision_id ?? o.cls}\` (${Math.round((r.score ?? o.vision_score ?? 0.75) * 100)}%, источник: \`${r.source ?? o.vision_source ?? "gemini-vision"}\`).`;
-  const desc = (reason ? `\n_${reason}_` : "") + `\nГабариты 3D: \`${dims}\``;
+    : `Selected **[${o.id}] ${nameOf(o)}** — class \`${r.id ?? o.vision_id ?? o.cls}\` (${Math.round((r.score ?? o.vision_score ?? 0.75) * 100)}%, source: \`${r.source ?? o.vision_source ?? "gemini-vision"}\`).`;
+  const desc = (reason ? `\n_${reason}_` : "") + `\n3D size: \`${dims}\``;
   const msg = say("bot", head + desc);
   msg.insertAdjacentHTML("beforeend", "<br>" +
     (o.thumb ? `<img src="${o.thumb}" width="112" height="112" alt="3D render the AI saw for ${o.id}" title="3D splat render" style="margin:6px 6px 0 0;border-radius:4px;vertical-align:top">` : "") +
     photoHTML(o.photo) +
     `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-      <button type="button" class="gvis" style="font-size:11px;padding:4px 8px;cursor:pointer">✨ Gemini Vision (Объект)</button>
-      <button type="button" class="ginspect" style="font-size:11px;padding:4px 8px;cursor:pointer">🔍 Инспекция (Copilot)</button>
+      <button type="button" class="gvis" style="font-size:11px;padding:4px 8px;cursor:pointer">✨ Gemini Vision (object)</button>
+      <button type="button" class="ginspect" style="font-size:11px;padding:4px 8px;cursor:pointer">🔍 Inspect (copilot)</button>
+      ${o.asset ? `<button type="button" class="gdraft" style="font-size:11px;padding:4px 8px;cursor:pointer">📝 Work-order draft</button>` : ""}
     </div>`);
+  if (o.asset) msg.querySelector(".gdraft").onclick = () => draftWorkOrder(o.asset);
   msg.querySelector(".gvis").onclick = (e) => geminiClassify(o, e.currentTarget);
-  msg.querySelector(".ginspect").onclick = () => copilot(o.asset ? `Проведи полную диагностику ${o.asset.tag}` : `Проведи техническую инспекцию объекта ${o.id} (${nameOf(o)}) в котельной.`);
+  msg.querySelector(".ginspect").onclick = () => copilot(o.asset ? `Run a full diagnosis of ${o.asset.tag}.` : `Inspect object ${o.id} (${nameOf(o)}) in the boiler room.`);
   proximity();
 }
-function onArrive() {
+async function draftWorkOrder(asset) {
+  const r = await fetch("api/work-orders/draft", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ asset_id: asset.asset_id }) }).then((r) => r.json()).catch((e) => ({ error: e.message }));
+  if (r.error) return say("bot", `Work-order draft unavailable: ${r.error}`);
+  say("bot", `📝 **Work-order draft for ${r.tag} [${r.asset_id}]** — ${r.priority} priority, ${r.maintenance_type}, not submitted\n`
+    + `Action: ${r.action} (\`${r.issue_code}\`, ${r.issue_summary})\n`
+    + r.steps.map((t, i) => `${i + 1}. ${t}`).join("\n")
+    + `\nEvidence: ${r.evidence.map((e) => `[${e}]`).join(" ")}\nConfidence ${r.confidence.overall} (model ${r.confidence.model}, ${r.confidence.data_quality_flags} data-quality flags, 3D identity ${r.confidence.identity_3d})`);
+}
+async function onArrive() {
   status(`Arrived at ${target.asset.tag} — running diagnosis`);
   selected = target; history = [];
   $("#q").placeholder = `Ask about ${target.asset.tag}…`;
   say("bot", `🔴 **Arrived at faulty device ${target.asset.tag}.** Running grounded diagnosis…`);
-  copilot();
+  await copilot();
+  const msg = say("bot", "Next step:");
+  msg.insertAdjacentHTML("beforeend", ' <button type="button" style="font-size:11px;padding:4px 8px;cursor:pointer">📝 Work-order draft</button>');
+  msg.querySelector("button").onclick = () => draftWorkOrder(target.asset);
 }
 $("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); copilot(q); };
 $("#gemini-hud").onclick = (e) => geminiScanScene(e.currentTarget);
@@ -529,7 +543,7 @@ $("#bim-size").onclick = (e) => {
   bimLarge = !bimLarge;
   bimCanvas.width = bimLarge ? 520 : 280;
   bimCanvas.height = bimLarge ? 380 : 205;
-  e.currentTarget.textContent = bimLarge ? "− Компактно" : "⛶ Крупно";
+  e.currentTarget.textContent = bimLarge ? "− Compact" : "⛶ Enlarge";
   drawBimMap();
 };
 function drawBimMap() {

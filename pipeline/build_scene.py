@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import ndimage, sparse
+from scipy.spatial import cKDTree
 from scipy.sparse.csgraph import connected_components
 
 VOXEL = 0.04          # m, object segmentation voxel
@@ -96,12 +97,22 @@ def build_grid(w, opacity, floor):
 
     y = w[:, 1]
     floor_hits = cells(dense & (np.abs(y - floor) < 0.12))
-    obst_hits = cells((opacity > 0.5) & (y > floor + 0.2) & (y < floor + HEAD))
+    band = (opacity > 0.5) & (y > floor + 0.2) & (y < floor + HEAD)
+    obst_hits = cells(band)
 
     seen_floor = ndimage.binary_closing(floor_hits > 0, iterations=4)
     seen_floor = ndimage.binary_fill_holes(seen_floor)
     obstacle = ndimage.binary_opening(obst_hits >= 4, iterations=1) | (obst_hits >= 12)
-    inflated = ndimage.binary_dilation(obstacle, iterations=int(np.ceil(ROBOT_R / CELL)))
+    # blocked = an obstacle splat closer than the avatar radius to the cell centre. Distances go to the real splats,
+    # not to whole 10 cm cells: the cell test made every gap 10-15 cm narrower than it is and cut off the corridor
+    # along the top wall (a 0.9 m gap between an insulated pipe and a shelf) from the rest of the room.
+    xz = w[band][:, [0, 2]]
+    ij = ((xz - lo) / CELL).astype(int)
+    inside = (ij[:, 0] >= 0) & (ij[:, 0] < W) & (ij[:, 1] >= 0) & (ij[:, 1] < H)
+    obs_pts = xz[inside][obstacle[ij[inside, 0], ij[inside, 1]]]  # only splats of cells that passed the noise rule
+    centres = lo + (np.indices((W, H)).reshape(2, -1).T + 0.5) * CELL
+    near = cKDTree(obs_pts).query(centres)[0].reshape(W, H) < ROBOT_R
+    inflated = obstacle | near
     walk = seen_floor & ~inflated
     lab, n = ndimage.label(walk)
     if n > 1:  # keep the largest connected walkable region
@@ -524,7 +535,10 @@ def line_free(g, a, b):
     n = int(max(abs(b[0] - a[0]), abs(b[1] - a[1]))) * 2 + 1
     for t in np.linspace(0, 1, n):
         c = (int(round(a[0] + (b[0] - a[0]) * t)), int(round(a[1] + (b[1] - a[1]) * t)))
-        if not g["walk"][c] or g["clearance"][c] < 0.15:
+        # walk cells already keep the avatar radius from every obstacle splat, so no second margin here.
+        # shortcut: samples are cell centres, so a segment may pass up to ~5 cm closer than ROBOT_R between them;
+        # store the per-cell splat distance and sample it sub-cell if a robot ever needs a hard guarantee.
+        if not g["walk"][c]:
             return False
     return True
 
@@ -611,7 +625,10 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     cands = (reachable({tcls}, 1.3) or reachable(compatible, 1.0)
              or reachable({o["cls"] for o in objs} - set(NOT_ASSETS), 2.0))
     assert cands, "no equipment box within 2 m of walkable floor to place the faulty asset on"
-    _, ti, goal = cands[min(len(cands) - 1, len(cands) // 8)]  # far, but not the very edge of the scan
+    # a long walk shows more of the room: far, but not the scan's edge, among boxes that really look like the device
+    # (its class, seen by vision, right size: fit >= 8.5); without such a box, among all candidates
+    fits = [c for c in cands if asset_fit_score(objs[c[1]], tcls) >= 8.5] or cands
+    _, ti, goal = fits[min(len(fits) - 1, len(fits) // 8)]
     holder = next((o for o in objs if o.get("asset", {}).get("asset_id") == target_asset), None)
     if holder is not objs[ti]:  # swap so the worst-health asset sits on the chosen target object
         if holder is not None:

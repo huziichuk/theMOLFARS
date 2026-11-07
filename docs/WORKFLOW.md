@@ -31,7 +31,7 @@ sequenceDiagram
    - Check `web/floorplan.png`. Green is walkable, red is obstacle, blue are boxes, the red box is the target and yellow is the route.
 3. **Extract the video frames:** `python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1`.
 4. **Start the database and serve:**
-   - `docker compose up -d` (PostgreSQL), then `python seed_db.py` (loads the Excel pack; re-run after changing it).
+   - `docker compose up -d` (PostgreSQL), then `python seed_db.py` (loads the Excel pack; re-run after changing it). Without Docker skip this: the server falls back to SQLite seeded from the same Excel.
    - `python server.py`, then open http://localhost:8000. Wait for the splat to load (~395 MB, a few seconds).
 5. **Run the vision pass once.** Press **AI labels (CLIP)**.
    - The first run downloads CLIP B/16, indexes the video tiles (~4 min) and labels 414 boxes (~3 min). Later runs reuse the cache.
@@ -58,9 +58,11 @@ sequenceDiagram
 - Unit tests: `python -m unittest discover tests`:
   - sanitize: clean file, garbage tail, mid-file bad block;
   - saved outputs (`SavedVisionLabels`): labels match the scene, ≥ 75% on the benchmark, every object has vision fields, all 30 assets sit on equipment. No Gemini wording is asserted, so re-running `gemini_vision.py` keeps them green;
-  - `PostgresBackend`: the evidence context for ASSET-017, the object context, and that a `text/plain` POST gets 415 (the CSRF guard); needs the server deps and the seeded database.
+  - `PostgresBackend`: the evidence context for ASSET-017, the object context, the confidence rule (Q-06), and that a `text/plain` POST gets 415 (the CSRF guard); needs the server deps and either the seeded database or `data/builder_pack.xlsx` for the SQLite fallback.
+- API_Contract routes checked against the SQLite fallback: telemetry (144 rows for ASSET-017), events (34), documents (own card + class + site docs), scene anchors (30, all mapped to scan boxes), work-order draft (high priority, 7 steps, evidence IDs), unknown asset → 404/400.
 - Server smoke test with a fake Gemini client (on 0d19530 + fixes): 3 parallel Gemini requests finish in 0.7 s instead of queueing, and all 3 labels are saved; oversized and non-base64 bodies get 400; a non-numeric `score` is clamped.
-- A rebuild from the committed `vision_labels.json` reproduces every box's class and the target (OBJ-048); 11 assets swap tags within their class.
+- A rebuild from the committed `vision_labels.json` reproduces every box's class and the target; assets of one class may swap tags.
+- Nav grid with point-exact clearance: 2,276 walkable cells (was 1,431); route 8.9 m / 11 waypoints, every cell asserted walkable and ≥ 0.224 m from every obstacle splat; `NavGrid` tests: a 0.6 m gap is passable, a 0.3 m gap is not.
 - `AssetMapping` test: the worst-health asset goes to the box that fits and never to a box vision calls a wall (it fails if walls are allowed).
 - Security checks on a copy of `web/`: `text/plain` POSTs to all 4 endpoints get 415 and the labels stay intact; a planted `<img onerror>` label shows as text in the viewer and does not run.
 - Vision benchmark: 50 hand-labelled render crops (`tests/vision_eval.json`) × 3 models × 6 variants. See HOW_IT_WORKS §2.1.
@@ -99,6 +101,7 @@ sequenceDiagram
 | Vision still wrong on many boxes after CLIP (26/50 render-only on the benchmark) | Gemini sees the same crops and names everyday items correctly | `gemini_vision.py` (batch) and two live Gemini buttons; `refine_vision` geometry rules; 49/50 on the benchmark. The committed scores still carry a 0.55 floor (removed from the script; re-run to fix), and part of the rules are room-specific: see HOW_IT_WORKS §2.3. |
 | Gemini endpoints froze the server and could lose labels | The blocking SDK call ran on the event loop; files were read before the call and written after | Call in a worker thread and re-read the files right before the write; 5 MB body limit; scores clamped. |
 | Audit (ponytail): any website could overwrite labels on the local server and inject HTML through them | A cross-site `text/plain` POST got 200 and left 1 of 414 labels; an `<img onerror>` label was rendered as HTML | JSON-only POSTs (415 otherwise), labels escaped in the viewer, Postgres bound to localhost, splat revalidated instead of re-downloaded, Gemini score floor removed, room-specific rules gated by `scene_id`, one shared room note and class rule, copilot body and history capped, an asset-mapping test. |
+| A third of the floor looked unused | Cell classes: 28% obstacle, 43% avatar-radius margin, 8% free but cut off, 22% walkable. The margin was measured to whole 10 cm cells, so every gap looked 10–15 cm narrower than it is; the corridor along the equipment wall (a 0.9 m gap between a pipe bend and a shelf, seen in a cross-section of the splat) was cut off | Clearance measured to the real obstacle splats with a k-d tree, same 0.22 m person radius: 2,276 walkable cells (+59%). The route now runs along the equipment wall and passes 14 assets instead of 5. The target stays on a pump-shaped box far from the start. |
 | Clicking a 3D label showed no vision data | The click handler captured the raw scene object | The handler is bound to the live object. |
 | `pandas` 3 rejected `agg("first")` | The server crashed during retrieval | Compute first/last/min/max/mean explicitly per series. |
 | Pointer Lock refused in the embedded browser | `SecurityError` | WASD/arrow walking works without pointer lock; mouse-look is optional. |
