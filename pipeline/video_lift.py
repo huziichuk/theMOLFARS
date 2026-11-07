@@ -28,9 +28,8 @@ from build_scene import load_ply, sane_mask, to_world  # noqa: E402
 
 # one vocabulary for the browser pass and this script
 _V = json.loads((Path(__file__).parents[1] / "web" / "vocab.json").read_text())
-VOCAB = [tuple(v) for v in _V["labels"]]
-PROMPT = _V["prompt"]
-EQUIPMENT = [p for p, c in VOCAB if c not in ("CLUTTER", "PIPE")]
+CLASSES, TEMPLATES = _V["classes"], _V["templates"]
+EQUIPMENT = [(p, c) for c in CLASSES if c["kind"] == "equipment" for p in c["prompts"]]  # OWLv2 text queries
 MAX_VIEWS = 6          # best views per box used in the vote
 MIN_BOX_PX = 40        # ignore projections smaller than this
 MIN_SEEN_PTS = 3       # COLMAP points inside a box that a frame must observe, so occluded views don't vote
@@ -188,9 +187,12 @@ def main(a):
     print(f"[models] torch on {dev}")
     clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(dev).eval()  # bigger than the browser model
     cproc = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
-    with torch.no_grad():
-        t = cproc(text=[PROMPT.format(p) for p, _ in VOCAB], return_tensors="pt", padding=True).to(dev)
-        text_emb = torch.nn.functional.normalize(clip.get_text_features(**t), dim=-1)
+    with torch.no_grad():  # one embedding per class: mean over prompts x templates (prompt ensemble), as in the browser
+        emb = []
+        for c in CLASSES:
+            t = cproc(text=[tp.format(p) for p in c["prompts"] for tp in TEMPLATES], return_tensors="pt", padding=True).to(dev)
+            emb.append(torch.nn.functional.normalize(clip.get_text_features(**t), dim=-1).mean(0))
+        text_emb = torch.nn.functional.normalize(torch.stack(emb), dim=-1)
 
     def clip_probs(crops):
         with torch.no_grad():
@@ -236,10 +238,11 @@ def main(a):
             continue
         p = clip_probs(crops).mean(0)  # multi-view vote
         k = int(p.argmax())
-        labels[o["id"]] = dict(label=VOCAB[k][0], cls=VOCAB[k][1], score=round(float(p[k]), 3), views=len(crops),
-                               frames=[img.name for _, img, _ in views[:MAX_VIEWS]])
+        c = CLASSES[k]
+        labels[o["id"]] = dict(id=c["id"], label=c["name"], kind=c["kind"], asset_class=c["asset_class"],
+                               score=round(float(p[k]), 3), views=len(crops), frames=[img.name for _, img, _ in views[:MAX_VIEWS]])
     print(f"[labels] {len(labels)}/{len(scene['objects'])} boxes seen in video, "
-          f"{sum(v['score'] >= 0.3 for v in labels.values())} confident, {unseen} without SfM points")
+          f"{sum(v['score'] >= _V['min_score'] for v in labels.values())} confident, {unseen} without SfM points")
 
     # 5) OWLv2 on frames -> lift detections with COLMAP points inside each 2D box
     owl = Owlv2ForObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble").to(dev).eval()
@@ -249,7 +252,7 @@ def main(a):
     for img, K, P, wh in cams[:: max(1, len(cams) // 120)]:  # ~120 frames is plenty
         im = Image.open(img_dir / img.name).convert("RGB")
         with torch.no_grad():
-            x = oproc(text=[EQUIPMENT], images=im, return_tensors="pt").to(dev)
+            x = oproc(text=[[p for p, _ in EQUIPMENT]], images=im, return_tensors="pt").to(dev)
             out = owl(**x)
         sz = max(im.size)
         det = oproc.post_process_object_detection(out, threshold=0.25, target_sizes=torch.tensor([[sz, sz]]).to(dev))[0]
@@ -264,7 +267,7 @@ def main(a):
             lo, hi = np.percentile(q, 10, 0), np.percentile(q, 90, 0)
             if (hi - lo).max() > 2.5 or (hi - lo).max() < 0.05:
                 continue
-            found.append(dict(label=EQUIPMENT[int(lab)], score=round(float(score), 3), bmin=lo, bmax=hi))
+            found.append(dict(cls=EQUIPMENT[int(lab)][1], score=round(float(score), 3), bmin=lo, bmax=hi))
 
     def overlap(a_lo, a_hi, b_lo, b_hi):
         inter = np.clip(np.minimum(a_hi, b_hi) - np.maximum(a_lo, b_lo), 0, None).prod()
@@ -276,8 +279,9 @@ def main(a):
     for d in sorted(found, key=lambda d: -d["score"]):
         if all(overlap(d["bmin"], d["bmax"], lo, hi) < 0.3 for lo, hi in existing):
             existing.append((d["bmin"], d["bmax"]))
-            extra.append(dict(id=f"VID-{len(extra):03d}", label=d["label"], score=d["score"],
-                              cls=dict(VOCAB)[d["label"]], center=((d["bmin"] + d["bmax"]) / 2).round(3).tolist(),
+            c = d["cls"]
+            extra.append(dict(id=f"VID-{len(extra):03d}", class_id=c["id"], label=c["name"], kind=c["kind"],
+                              asset_class=c["asset_class"], score=d["score"], center=((d["bmin"] + d["bmax"]) / 2).round(3).tolist(),
                               size=(d["bmax"] - d["bmin"]).round(3).tolist()))
     print(f"[owlv2] {len(found)} detections lifted to 3D -> {len(extra)} new objects")
 

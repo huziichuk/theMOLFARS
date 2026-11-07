@@ -40,6 +40,8 @@ The starter data is not in git (size and licence). Put these files in `data/`:
 python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web    # ~5 s
 python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1             # 112 frames
 python server.py                                                                     # http://localhost:8000
+# in the viewer: press "AI labels (CLIP)" once; then optionally map Excel by what vision saw:
+python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web --vision web/vision_labels.json
 ```
 
 Optional: set `ANTHROPIC_API_KEY` to get LLM answers to free-form copilot questions. Without it the copilot returns a fully cited, templated evidence report.
@@ -70,7 +72,10 @@ web/
   scene.json          pipeline output (objects, grid, route, mapping)
   floorplan.png       debug/slide image of grid + boxes + route
 docs/                 documentation and figures
-web/vocab.json        CLIP label vocabulary shared by the browser pass and video_lift.py
+inputs/ml_segment/    boxes from the team's ml branch (Open3D segment.py), for build_scene.py --boxes
+web/vocab.json        CLIP model, classes, prompts, templates (shared by the browser pass and video_lift.py)
+web/prototype_tiles.json   hand-labelled video tiles used as visual class prototypes
+web/vision_labels.json     saved result of the browser vision pass (written by POST /api/vision)
 tests/                unit tests (python -m unittest discover tests)
 requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 deps
 ```
@@ -83,10 +88,11 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 | Room height | floor y −1.17, ceiling y 0.87 (2.04 scan units) |
 | Nav grid | 97×83 cells of 10 cm; 1,431 walkable |
 | Segmentation | 414 framed objects |
-| Excel mapping | all 30 assets mapped; target ASSET-017 / P-005 sits on a red pipe-mounted pump |
-| Route | 6.5 m, 14 waypoints |
-| Vision (CLIP on renders) | 56–65 confident labels (≥ 0.30), depending on the run |
-| Vision with the video photo match | **73** confident labels; 86 boxes matched to a real photo |
+| Excel mapping | all 30 assets mapped; target ASSET-017 / P-005 sits on a box vision labels as a pump |
+| Route | 7.7 m, 14 waypoints |
+| Vision (CLIP B/16, 14 classes, prompt ensemble) | **302 / 414** boxes confidently labelled (≥ 0.4); the rest read "Unidentified object" |
+| Vision benchmark (50 hand-labelled crops) | old setup 30% → **66%** correct; 74% precision on the labels actually shown |
+| Excel mapping after `--vision` | all 30 assets on boxes vision sees as pumps / valves / gauges / motors (before: 11 on walls, 4 on boxes) |
 | Copilot | offline evidence mode verified for all 30 assets in ~0.3 s |
 
 ## Known limits

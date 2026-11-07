@@ -1,0 +1,18 @@
+{
+  "note": "Hand labels for render crops of scene dd7b3b0846cb (Equipment Room.ply), judged by eye on the object at the crop centre. Ambiguous crops were left out. Classes are coarse on purpose.",
+  "classes": ["PUMP", "VALVE", "GAUGE", "CABINET", "TANK", "PIPE", "APPLIANCE", "CHAIR", "LADDER", "BOX", "CART", "LAMP", "STRUCTURE"],
+  "labels": {
+    "OBJ-268": "STRUCTURE", "OBJ-292": "STRUCTURE", "OBJ-386": "PIPE", "OBJ-244": "VALVE", "OBJ-011": "APPLIANCE",
+    "OBJ-002": "APPLIANCE", "OBJ-339": "STRUCTURE", "OBJ-217": "STRUCTURE", "OBJ-245": "LAMP", "OBJ-303": "PIPE",
+    "OBJ-242": "STRUCTURE", "OBJ-278": "PIPE", "OBJ-400": "STRUCTURE", "OBJ-320": "TANK", "OBJ-109": "TANK",
+    "OBJ-041": "CART", "OBJ-055": "CART", "OBJ-009": "TANK",
+    "OBJ-363": "TANK", "OBJ-323": "PIPE", "OBJ-043": "TANK", "OBJ-068": "APPLIANCE", "OBJ-158": "STRUCTURE",
+    "OBJ-139": "PUMP", "OBJ-231": "STRUCTURE", "OBJ-368": "STRUCTURE", "OBJ-305": "STRUCTURE", "OBJ-266": "STRUCTURE",
+    "OBJ-143": "PIPE", "OBJ-250": "STRUCTURE", "OBJ-077": "LADDER", "OBJ-324": "TANK", "OBJ-369": "STRUCTURE",
+    "OBJ-157": "APPLIANCE",
+    "OBJ-207": "PIPE", "OBJ-190": "STRUCTURE", "OBJ-034": "PIPE", "OBJ-162": "PIPE", "OBJ-039": "TANK",
+    "OBJ-251": "LADDER", "OBJ-096": "BOX", "OBJ-254": "BOX", "OBJ-345": "STRUCTURE", "OBJ-038": "CABINET",
+    "OBJ-201": "BOX", "OBJ-050": "PIPE", "OBJ-151": "VALVE", "OBJ-085": "PUMP", "OBJ-075": "STRUCTURE",
+    "OBJ-133": "TANK"
+  }
+}

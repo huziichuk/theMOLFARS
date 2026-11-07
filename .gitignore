@@ -7,3 +7,4 @@ web/frames/
 work/
 .venv*/
 __pycache__/
+web/_eval/

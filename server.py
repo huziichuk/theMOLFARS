@@ -6,6 +6,7 @@ otherwise a deterministic evidence-only report built from the same context.
 """
 import json
 import os
+import re
 from functools import lru_cache
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -140,7 +141,30 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(404, {"error": "unknown asset"})
         return super().do_GET()
 
+    def save_vision(self):
+        """Store the browser's vision pass so every viewer (and build_scene.py --vision) gets the same labels."""
+        n = int(self.headers.get("Content-Length", 0))
+        if n > 5_000_000:
+            return self._json(413, {"error": "too large"})
+        try:
+            req = json.loads(self.rfile.read(n))
+            scene_id = json.loads((ROOT / "web" / "scene.json").read_text())["scene_id"]
+            labels = req["labels"]
+            ok = req.get("scene_id") == scene_id and isinstance(labels, dict) and all(
+                isinstance(k, str) and re.fullmatch(r"[A-Z]{3}-\d{3}", k) and isinstance(v, dict) for k, v in labels.items())
+        except (KeyError, ValueError, TypeError, OSError):
+            ok = False
+        if not ok:
+            return self._json(400, {"error": "labels must be {OBJ-123: {...}} for the current scene_id"})
+        out = ROOT / "web" / "vision_labels.json"
+        tmp = out.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"scene_id": scene_id, "model": str(req.get("model", "")), "labels": labels}))
+        tmp.replace(out)  # atomic: a reader never sees half a file
+        return self._json(200, {"saved": len(labels)})
+
     def do_POST(self):
+        if self.path == "/api/vision":
+            return self.save_vision()
         if self.path != "/api/copilot":
             return self._json(404, {"error": "not found"})
         try:

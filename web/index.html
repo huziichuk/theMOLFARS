@@ -113,7 +113,7 @@ $("#file").addEventListener("change", async (e) => {
 });
 
 // ---------- scene data from the Python pipeline
-const S = await (await fetch("scene.json")).json();
+const S = await (await fetch(new URLSearchParams(location.search).get("scene") || "scene.json")).json(); // ?scene= to compare pipelines
 setSplat({ url: S.splat });
 const floorY = S.floor_y;
 const G = S.grid;
@@ -294,7 +294,7 @@ async function copilot(question) {
 function select(o) {
   selected = o; history = [];
   $("#q").placeholder = o.asset ? `Ask about ${o.asset.tag}…` : "Not an Excel asset";
-  const seen = o.ai ? ` Vision (${o.ai.source}): ${o.ai.label} (${Math.round(o.ai.score * 100)}%), geometry: ${o.label}.` : "";
+  const seen = o.ai ? ` Vision (${o.ai.source}): ${sure(o) ? "" : "unsure, best guess "}${o.ai.label} (${Math.round(o.ai.score * 100)}%), shape guess: ${o.label}.` : "";
   const msg = say("bot", (o.asset ? `Selected **${o.asset.tag}** [${o.asset.asset_id}] — ${o.asset.asset_class}, ${o.asset.condition_state}, health ${o.asset.health_score}.` : `Selected ${nameOf(o)} (unregistered).`) + seen);
   msg.insertAdjacentHTML("beforeend", "<br>" +
     (o.thumb ? `<img src="${o.thumb}" width="112" height="112" alt="3D render the AI saw for ${o.id}" title="3D splat render" style="margin:6px 6px 0 0;border-radius:4px;vertical-align:top">` : "") +
@@ -309,18 +309,18 @@ function onArrive() {
 }
 $("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); copilot(q); };
 
-// ---------- client-side AI vision: CLIP zero-shot labels for every 3D frame (transformers.js, no server, no key)
-// prompt -> asset class (CLUTTER = not equipment); shared with pipeline/video_lift.py
-const { labels: VOCAB, prompt: PROMPT } = await (await fetch("vocab.json")).json();
-const MIN_SCORE = 0.3; // below this keep the geometric label
+// ---------- AI vision: CLIP in the browser (transformers.js) labels every 3D frame; results are saved on the server
+const VOC = await (await fetch("vocab.json")).json(); // model, classes, prompts, templates; shared with video_lift.py
+const MIN_SCORE = VOC.min_score; // below it a frame is "Unidentified" (benchmark: 74% precision on 76% of frames at 0.4)
 const SIM_MIN = 0.03;  // CSLS margin (render vs video tile) needed to trust the photo match; calibrated by eye on pairs
-const AI_KEY = `clip-labels:v5:${S.scene_id}`; // object IDs are only valid for this exact pipeline output
-const nameOf = (o) => (o.ai && o.ai.score >= MIN_SCORE ? o.ai.label : o.label);
+const UNKNOWN = "Unidentified object";
+const sure = (o) => o.ai && o.ai.score >= MIN_SCORE;
+const nameOf = (o) => (!o.ai ? o.label : sure(o) ? o.ai.label : UNKNOWN); // shape guess only until vision has run
 function applyAI(o, r) {
   o.ai = r;
-  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (r.score >= MIN_SCORE ? `${r.label} ${Math.round(r.score * 100)}%` : o.label);
-  o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}% · geometry: ${o.label}`;
-  if (r.cls === "CLUTTER" && r.score >= MIN_SCORE && !o.asset) { // vision says "not equipment": fade the frame
+  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (sure(o) ? `${r.label} ${Math.round(r.score * 100)}%` : UNKNOWN);
+  o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}% · shape guess: ${o.label}`;
+  if (r.kind === "clutter" && sure(o) && !o.asset) { // vision says "not equipment": fade the frame
     o.box.material.color.set(0x555555);
     o.box.material.opacity = 0.35;
   }
@@ -331,13 +331,17 @@ function decide(o) {
   const r = o.render, p = o.photo;
   return p && p.csls >= SIM_MIN && p.score > r.score ? { ...p, source: "photo" } : { ...r, source: "render" };
 }
-const cached = JSON.parse(localStorage.getItem(AI_KEY) || "{}");
-objs.forEach((o) => {
-  const c = cached[o.id];
-  if (!c) return;
-  Object.assign(o, { render: c.render, photo: c.photo });
-  applyAI(o, decide(o));
-});
+// labels from the last vision pass, saved by the server for this exact scene
+fetch("vision_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
+  if (!v || v.scene_id !== S.scene_id) return; // other pipeline run: its object IDs point at different boxes
+  for (const o of objs) {
+    const c = v.labels[o.id];
+    if (!c) continue;
+    Object.assign(o, { render: c.render, photo: c.photo });
+    applyAI(o, decide(o));
+  }
+  lastNear = "";
+}).catch(() => {});
 // option 2 output (pipeline/video_lift.py on a GPU PC): multi-view labels + objects found only in the video
 fetch("video_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
   if (!v) return;
@@ -348,7 +352,7 @@ fetch("video_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
   for (const o of objs) if (v.labels[o.id]) { o.video = v.labels[o.id]; applyAI(o, decide(o)); }
   for (const e of v.extra_objects) {
     const o = makeObj({ ...e, asset: null }, 0x4ec9ff); // cyan = discovered in the video, not in the geometry pass
-    o.video = { label: e.label, score: e.score, cls: e.cls, views: 1 };
+    o.video = { id: e.class_id, label: e.label, kind: e.kind, asset_class: e.asset_class, score: e.score, views: 1 };
     objs.push(o);
     applyAI(o, decide(o));
   }
@@ -400,37 +404,55 @@ async function captureBox(o) {
   sctx.drawImage(renderer.domElement, cx - side / 2, cy - side / 2, side, side, 0, 0, 224, 224);
 }
 
-const MODEL = "Xenova/clip-vit-base-patch32";
-let TJS, clip, vision, processor, clipDevice;
+const MODEL = VOC.model;
+let TJS, vision, textModel, tokenizer, processor, clipDevice, textEmb;
+const unit = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
+const meanUnit = (vs) => { const m = new Float32Array(vs[0].length); vs.forEach((v) => v.forEach((x, i) => (m[i] += x))); return unit(m); };
+const dot = (a, b) => { let s = 0; for (let k = 0; k < a.length; k++) s += a[k] * b[k]; return s; };
+const rows = (t) => { const d = t.dims.at(-1); return Array.from({ length: t.dims[0] }, (_, i) => unit(Float32Array.from(t.data.subarray(i * d, (i + 1) * d)))); };
 async function loadModels() {
   TJS ??= await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/+esm");
-  if (clip) return;
-  const opts = (device) => ({ device, dtype: "q8", // quantized; cached by the browser after the first run
-    progress_callback: (p) => p.status === "progress_total" && status(`Downloading CLIP… ${Math.round(p.progress)}%`) });
-  // q8 runs slowly on WebGPU (dequantisation); the embedding model does ~1,900 images, so use fp16 where the GPU supports it
+  if (vision) return;
+  // fp16 on WebGPU where supported (q8 dequantises slowly there); weights are cached by the browser after the first run
   const f16 = !!(await navigator.gpu?.requestAdapter())?.features.has("shader-f16");
-  const load = async (device) => [
-    await TJS.pipeline("zero-shot-image-classification", MODEL, opts(device)),       // text-vs-image labels
-    await TJS.CLIPVisionModelWithProjection.from_pretrained(MODEL,                   // image embeddings for matching
-      { ...opts(device), dtype: device === "webgpu" && f16 ? "fp16" : "q8" }),
-  ];
+  const opts = (device) => ({ device, dtype: device === "webgpu" && f16 ? "fp16" : "q8",
+    progress_callback: (p) => p.status === "progress_total" && status(`Downloading CLIP… ${Math.round(p.progress)}%`) });
+  const load = async (device) => [await TJS.CLIPVisionModelWithProjection.from_pretrained(MODEL, opts(device)),
+                                  await TJS.CLIPTextModelWithProjection.from_pretrained(MODEL, opts(device))];
   clipDevice = navigator.gpu ? "webgpu" : "wasm";
-  [clip, vision] = await load(clipDevice).catch(() => load((clipDevice = "wasm")));
-  processor = await TJS.AutoProcessor.from_pretrained(MODEL);
+  [vision, textModel] = await load(clipDevice).catch(() => load((clipDevice = "wasm")));
+  [tokenizer, processor] = await Promise.all([TJS.AutoTokenizer.from_pretrained(MODEL), TJS.AutoProcessor.from_pretrained(MODEL)]);
+  // prompt ensemble: one text embedding per class = mean over its prompts x templates (+8 points on tests/vision_eval.json)
+  textEmb = [];
+  for (const c of VOC.classes) {
+    const texts = c.prompts.flatMap((p) => VOC.templates.map((t) => t.replace("{}", p)));
+    textEmb.push(meanUnit(rows((await textModel(tokenizer(texts, { padding: true, truncation: true }))).text_embeds)));
+  }
 }
-async function embed(raws) { // L2-normalised CLIP image embeddings
-  const { image_embeds } = await vision(await processor(raws));
-  const d = image_embeds.dims.at(-1), data = image_embeds.data;
-  return raws.map((_, i) => {
-    const v = Float32Array.from(data.subarray(i * d, (i + 1) * d));
-    const n = Math.hypot(...v);
-    return v.map((x) => x / n);
-  });
+async function embed(raws) { // L2-normalised CLIP image embeddings, in batches the GPU handles comfortably
+  const out = [];
+  for (let i = 0; i < raws.length; i += 16) out.push(...rows((await vision(await processor(raws.slice(i, i + 16)))).image_embeds));
+  return out;
 }
-async function classify(raws) {
-  let out = await clip(raws, VOCAB.map((v) => v[0]), { hypothesis_template: PROMPT });
-  if (!Array.isArray(out[0])) out = [out];
-  return out.map((r) => ({ label: r[0].label, score: +r[0].score.toFixed(3), cls: VOCAB.find((v) => v[0] === r[0].label)[1] }));
+// visual examples per class: hand-labelled video tiles, already embedded while indexing the video
+async function buildPrototypes(tiles) {
+  const idx = Object.fromEntries(VOC.classes.map((c, i) => [c.id, i])), per = VOC.classes.map(() => []);
+  const key = (f, x, y, s) => `${f}:${Math.round(x / 10)}:${Math.round(y / 10)}:${s}`; // x may differ by 1 px (rounding)
+  const byKey = new Map(tiles.map((t) => [key(t.f, t.x, t.y, t.s), t.e]));
+  const pt = await (await fetch("prototype_tiles.json")).json();
+  for (const [c, list] of Object.entries(pt.tiles)) for (const [f, x, y] of list) {
+    const e = byKey.get(key(f, x, y, pt.size));
+    if (e && c in idx) per[idx[c]].push(e);
+  }
+  return { protos: per.map((l) => (l.length ? meanUnit(l) : null)), counts: Object.fromEntries(VOC.classes.map((c, i) => [c.id, per[i].length])) };
+}
+function classify(v, protos) { // text similarity + small prototype bonus -> softmax over classes
+  const ps = protos.map((p) => (p ? dot(p, v) : null)), have = ps.filter((x) => x != null);
+  const mu = have.length ? have.reduce((a, b) => a + b) / have.length : 0;
+  const s = VOC.classes.map((_, i) => 100 * (dot(textEmb[i], v) + VOC.proto_weight * ((ps[i] ?? mu) - mu)));
+  const mx = Math.max(...s), ex = s.map((x) => Math.exp(x - mx)), z = ex.reduce((a, b) => a + b);
+  const best = ex.indexOf(Math.max(...ex)), c = VOC.classes[best];
+  return { id: c.id, label: c.name, kind: c.kind, asset_class: c.asset_class, score: +(ex[best] / z).toFixed(3) };
 }
 const loadImg = (src) => new Promise((ok, err) => Object.assign(new Image(), { onload() { ok(this); }, onerror: err, src }));
 const tile = Object.assign(document.createElement("canvas"), { width: 224, height: 224 });
@@ -448,7 +470,7 @@ async function indexVideo() {
   for (const [s, nx, ny] of [[H, 3, 1], [Math.round(H / 2), 5, 2]])
     for (const x of spots(W, s, nx)) for (const y of spots(H, s, ny)) layout.push({ x, y, s });
   // embeddings cost ~1 s/frame (fp16 on WebGPU): keep them in the Cache API, keyed by the source video's hash
-  const key = `/tile-embeddings-v2-${idx.source}-${idx.files.length}-${W}x${H}`;
+  const key = `/tile-embeddings-v3-${MODEL.replace(/\W/g, "_")}-${idx.source}-${idx.files.length}-${W}x${H}`;
   const cache = await caches.open("valmet-demo");
   const hit = await cache.match(key);
   if (hit) {
@@ -484,6 +506,7 @@ $("#ai").onclick = async () => {
     await loadModels();
     const device = clipDevice, t0 = performance.now();
     const tiles = await indexVideo();
+    const { protos, counts: protoCounts } = await buildPrototypes(tiles);
 
     // 1) render every 3D frame from the aisle, label it and embed it
     capturing = true;
@@ -497,8 +520,7 @@ $("#ai").onclick = async () => {
         o.thumb = snap.toDataURL("image/jpeg", 0.7);
         raws.push(TJS.RawImage.fromCanvas(snap));
       }
-      const [labs, embs] = [await classify(raws), await embed(raws)];
-      batch.forEach((o, j) => { o.render = labs[j]; o.emb = embs[j]; });
+      (await embed(raws)).forEach((e, j) => { batch[j].emb = e; batch[j].render = classify(e, protos); });
       status(`Rendering + labelling 3D frames ${Math.min(i + 8, objs.length)}/${objs.length} on ${device}…`);
     }
     hidden.forEach(([m, v]) => (m.visible = v));
@@ -518,29 +540,23 @@ $("#ai").onclick = async () => {
       for (let j = 0; j < T; j++) { const c = 2 * sim[i * T + j] - rObj[i] - rTile[j]; if (c > bc) { bc = c; bj = j; } }
       const t = tiles[bj];
       o.photo = { f: t.f, x: t.x, y: t.y, s: t.s, sim: +sim[i * T + bj].toFixed(3), csls: +bc.toFixed(3) };
+      if (bc >= SIM_MIN) Object.assign(o.photo, classify(t.e, protos)); // the sharp tile is already embedded
     });
     const matched = objs.filter((o) => o.photo.csls >= SIM_MIN);
-    const frameImgs = new Map();
-    for (let i = 0; i < matched.length; i += 8) {
-      const batch = matched.slice(i, i + 8), raws = [];
-      for (const o of batch) {
-        if (!frameImgs.has(o.photo.f)) frameImgs.set(o.photo.f, await loadImg(`frames/${videoIndex.files[o.photo.f]}`));
-        raws.push(tileRaw(frameImgs.get(o.photo.f), o.photo));
-      }
-      (await classify(raws)).forEach((r, j) => Object.assign(batch[j].photo, r));
-      status(`Labelling matched video photos ${Math.min(i + 8, matched.length)}/${matched.length}…`);
-    }
     objs.forEach((o) => applyAI(o, decide(o)));
-    localStorage.setItem(AI_KEY, JSON.stringify(Object.fromEntries(objs.map((o) => [o.id, { render: o.render, photo: o.photo }]))));
+    const saved = await fetch("api/vision", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_id: S.scene_id, model: MODEL, labels: Object.fromEntries(objs.filter((o) => o.render)
+        .map((o) => [o.id, { render: o.render, photo: o.photo, final: o.ai }])) }) }).then((r) => r.ok).catch(() => false);
 
-    const sure = objs.filter((o) => o.ai.score >= MIN_SCORE);
-    const byRender = objs.filter((o) => o.render.score >= MIN_SCORE).length;
-    const counts = {};
-    sure.forEach((o) => (counts[o.ai.label] = (counts[o.ai.label] || 0) + 1));
-    status(`AI labelled ${sure.length}/${objs.length} frames (render only: ${byRender}) · ${matched.length} matched to video · ${((performance.now() - t0) / 1000).toFixed(0)} s on ${device}`);
-    say("bot", `**Vision pass done** (CLIP, ${device}). ${matched.length}/${objs.length} frames matched to a real video photo (CSLS ≥ ${SIM_MIN}). ` +
-      `Confident labels ${byRender} → **${sure.length}**: ` +
-      Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ×${v}`).join(", ") + ".");
+    const confident = objs.filter(sure), byRender = objs.filter((o) => o.render?.score >= MIN_SCORE).length, counts = {};
+    confident.forEach((o) => (counts[o.ai.label] = (counts[o.ai.label] || 0) + 1));
+    status(`AI labelled ${confident.length}/${objs.length} frames (render only: ${byRender}) · ${matched.length} matched to video · ` +
+      `${((performance.now() - t0) / 1000).toFixed(0)} s on ${device}${saved ? " · saved" : " · NOT saved"}`);
+    say("bot", `**Vision pass done** (${MODEL.split("/").pop()}, ${device}). Prototypes: ` +
+      Object.entries(protoCounts).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(", ") +
+      `. ${matched.length}/${objs.length} frames matched to a real video photo. Confident labels ${byRender} → **${confident.length}**: ` +
+      Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ×${v}`).join(", ") +
+      `. Others are shown as “${UNKNOWN}”.`);
     lastNear = "";
   } catch (e) {
     status(`AI labelling failed: ${e.message}`);

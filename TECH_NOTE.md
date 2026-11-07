@@ -12,7 +12,8 @@
 | Viewer | three.js | 0.180.0 (CDN import map) | `web/index.html` |
 | Splat renderer | Spark (`@sparkjsdev/spark`) | 2.4.0 | `web/index.html` |
 | In-browser vision | transformers.js (`@huggingface/transformers`) on WebGPU, WASM fallback | 4.3.2 | `web/index.html` |
-| Vision model | CLIP ViT-B/32 (`Xenova/clip-vit-base-patch32`): zero-shot classifier q8 + image embeddings fp16 | ONNX | browser |
+| Vision model | CLIP ViT-B/16 (`Xenova/clip-vit-base-patch16`): vision + text towers, fp16 on WebGPU, q8 fallback; 14 classes × prompt ensemble (4 templates); picked on a 50-crop benchmark (B/32, B/16, L/14 tried) | ONNX | browser |
+| Visual prototypes | 129 hand-labelled tiles from the walk-through video | | `web/prototype_tiles.json` |
 | Photo matching | CLIP tile embeddings + CSLS hubness-corrected nearest neighbour; Cache API | | browser |
 | Copilot retrieval | Deterministic relational retrieval over 8 Excel sheets | pandas | `server.py` |
 | LLM | Anthropic Claude `claude-opus-5-5` via the `anthropic` Python SDK (low effort, server-side refusal fallback) | SDK 2.6.0 | `server.py` |

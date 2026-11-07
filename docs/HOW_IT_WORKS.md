@@ -62,7 +62,11 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 3. **Colour-aware connectivity:** a sparse graph links 26-neighbour voxels **only if their mean colours differ by < 0.10 per channel**. `scipy.sparse.csgraph.connected_components` gives the objects. This separates a red pump from the white insulated pipe it sits on and from the grey wall. Plain connectivity fused them into a few huge blobs: 46 boxes on the old file, versus 128 with colour, and 414 on the intact file.
 4. **Box per component:** the 2nd–98th percentile extent, which drops stray splats. Specks (< 8 cm) and slabs (> 2.5 m: walls, ceiling) are discarded, as are components with fewer than 30 splats.
 5. **NMS:** a box is dropped if more than 35% of the smaller box lies inside an already-kept, bigger box. As a result, frames never stack on top of each other, as the brief requires.
-6. **Heuristic class** from geometry and colour:
+6. **Optional union with the ml branch (`--boxes inputs/ml_segment`):**
+   - Boxes from the team's Open3D `segment.py` are converted into this frame through its `transform.json` (yaw boxes become axis-aligned) and NMS'd.
+   - Those that overlap none of ours by more than 35% are added.
+   - Measured: +77 boxes, of which 6 read as equipment, so it is off by default.
+7. **Heuristic class** from geometry and colour:
    - saturated red, mounted > 0.4 m above the floor, 0.2–0.8 m in size → *circulation pump*;
    - saturated red on the floor → *storage bin* (never mapped to an asset);
    - tall and thin → *vertical pipe*; long and flat → *horizontal pipe*;
@@ -91,7 +95,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
                 "asset": { "asset_id": "ASSET-017", "tag": "P-005", "condition_state": "…", "health_score": 44, … } | null }],
   "target_object": "OBJ-182", "target_asset": "ASSET-017",
   "path": [[x, y, z], …],
-  "scene_id": "dd7b3b0846cb"   // SHA-1 of this output; object IDs are only valid for one pipeline run
+  "scene_id": "9dd32119e0b1"   // SHA-1 of the box geometry; object IDs are valid only for these boxes
 }
 ```
 
@@ -109,15 +113,41 @@ This is a single static page with no build step. It loads three.js 0.180 and Spa
 
 ### 2.1 In-browser vision (CLIP, transformers.js)
 Pressing **AI labels (CLIP)**:
-1. Loads `Xenova/clip-vit-base-patch32` through `@huggingface/transformers` 4.3.2 on **WebGPU** (WASM fallback). It loads twice: as a zero-shot classification pipeline (q8) and as `CLIPVisionModelWithProjection` for image embeddings (fp16 when the GPU has `shader-f16`). The weights are cached by the browser after the first download.
+1. **Loads `Xenova/clip-vit-base-patch16`** (set in `web/vocab.json`) through `@huggingface/transformers` 4.3.2 on **WebGPU**, with a WASM fallback.
+   - It loads the vision and the text tower: `CLIPVisionModelWithProjection` and `CLIPTextModelWithProjection`, fp16 when the GPU has `shader-f16`, q8 otherwise.
+   - The browser caches the weights after the first download.
 2. **Renders each box:**
    - The camera is placed on the side of the nearest aisle cell (the view a technician gets), ≥ 0.8 m away because splats blur up close.
    - The main loop is paused. The view is rendered for 3 frames so Spark can re-sort the splats for the new viewpoint.
    - The projected box is cropped as a square with 80% context and scaled to 224².
-3. **Zero-shot labels** against the industrial vocabulary in `web/vocab.json`, which `video_lift.py` also reads (template "a photo of a {} in an industrial boiler room"):
-   - equipment: circulation pump, pump with motor, motor, control valve, hand-wheel valve, pressure gauge, control cabinet, red expansion vessel, blue pressure tank, insulated pipe;
-   - clutter: ladder, storage box, cardboard box, mesh cart, office chair, concrete wall.
-4. **Thresholds:** a label with score ≥ 0.30 replaces the geometric label. If a box is confidently clutter and not an Excel asset, its frame is faded.
+3. **Classifies against `web/vocab.json`,** which `video_lift.py` also reads. It has 14 classes:
+   - equipment: pump, motor, valve, gauge, cabinet, tank;
+   - infrastructure: pipe;
+   - clutter: washing machine, chair, ladder, box, cart, lamp, wall/floor.
+
+   Each class has 2–5 prompts. Its text embedding is the mean over all prompts × 4 templates (a *prompt ensemble*).
+4. **Prototypes.** Each class also gets a visual prototype: the mean embedding of its 129 hand-labelled tiles from our walk-through video (`web/prototype_tiles.json`). The tiles are already embedded during video indexing.
+
+   The score is `100 · (cos(text_c, v) + w · (cos(proto_c, v) − mean))` with `w = proto_weight` (0.25). A softmax over the classes gives the confidence.
+5. **Decision:** confidence ≥ `min_score` (0.4) shows the class name. Below it the frame reads **"Unidentified object"** instead of a shape guess (the guess stays in the tooltip). Clutter frames that carry no Excel asset are faded.
+6. **Saving.** The results go to `POST /api/vision` → `web/vision_labels.json`, keyed by `scene_id`. Every viewer loads them on start, so the labels are there without pressing the button again.
+
+#### Benchmark (`tests/vision_eval.json`)
+The test set is 50 render crops, hand-labelled by eye with 13 coarse classes; 22 ambiguous crops of the 72 sampled were left out. It measures accuracy at the object in the crop centre. With 50 samples, differences of ±7 points are noise.
+
+| Variant | CLIP B/32 | **CLIP B/16** | CLIP L/14 |
+|---|---|---|---|
+| Old vocabulary (16 prompts, 1 template) | 30% | 58% | 52% |
+| New vocabulary, 1 template | 52% | 64% | 62% |
+| New vocabulary + 4-template ensemble | 58% | **66%** | 66% |
+| Video prototypes only (kNN) | 50% | 46% | 50% |
+| Ensemble + video prototypes (best weight) | 64% | 66% | 68% |
+
+B/16 has about the same download size as B/32 and needs no prototypes to reach 66%. L/14 is ~4× larger and only marginally better. On B/16 at the 0.4 threshold, labels are shown for 38/50 crops with 74% precision.
+
+What this measured:
+- The main remaining errors are crops of large boxes whose framing shows a whole corner of the room, and confusions between pipe, valve and pump.
+- The video prototypes add nothing measurable on B/16.
 
 ### 2.2 Photo match with the walk-through video
 CLIP struggles on blurry splat renders, while the video shows the same equipment sharply.
@@ -128,7 +158,7 @@ CLIP struggles on blurry splat renders, while the video shows the same equipment
 4. Matches with CSLS ≥ 0.03 (calibrated by eye on match pairs) have their sharp tile classified. The photo label wins when it is more confident than the render label.
 5. The asset card shows the render next to the matched real photo, cropped directly from the frame JPEG with CSS (no canvas needed).
 
-Results are stored in `localStorage` (labels and match coordinates) under the scene's `scene_id`, and restored on reload. A rebuilt scene gets a new `scene_id`, so labels from an older run are never applied to renumbered boxes.
+The photo match reuses the tile embeddings, so no frame is decoded twice. Results are saved on the server (see 2.1). `scene_id` is a fingerprint of the box geometry, so it changes only when the boxes change. Labels from an older run are never applied to renumbered boxes.
 
 ---
 

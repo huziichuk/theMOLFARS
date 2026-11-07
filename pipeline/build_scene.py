@@ -1,10 +1,12 @@
 """Offline pipeline: raw 3DGS .ply -> clean splat + semantic objects + nav grid + A* route -> web/scene.json.
 
-Usage: python pipeline/build_scene.py data/boiler_room.ply data/builder_pack.xlsx web/
+Usage: python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web
+         [--vision web/vision_labels.json]   map Excel assets by the classes the browser vision pass saw
+         [--boxes DIR]                        add non-overlapping boxes from the ml branch's segment.py (objects.json + transform.json)
 """
+import argparse
 import hashlib
 import json
-import sys
 from heapq import heappop, heappush
 from pathlib import Path
 
@@ -146,6 +148,20 @@ def segment_objects(w, rows, P, floor, ceil):
     return nms(out)
 
 
+def load_ml_boxes(folder):
+    """Boxes from the team's ml branch (segment.py: objects.json + transform.json, Z-up floor frame, yaw boxes),
+    as axis-aligned boxes in this pipeline's world frame, with NMS to remove the overlaps that branch allows."""
+    T_inv = np.linalg.inv(np.array(json.loads((Path(folder) / "transform.json").read_text())["matrix"]))
+    out = []
+    for o in json.loads((Path(folder) / "objects.json").read_text()):
+        c, s, yaw = np.array(o["center"]), np.array(o["size"]), o["yaw"]
+        R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+        corners = np.array([c + R @ (s / 2 * np.array([x, y, z])) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
+        w = to_world((T_inv @ np.c_[corners, np.ones(8)].T).T[:, :3])
+        out.append(dict(bmin=w.min(0), bmax=w.max(0), nvox=o["n_points"], color=np.array(o["color"])))
+    return nms(out)
+
+
 def box_iou_overlap(a, b):
     inter = np.clip(np.minimum(a["bmax"], b["bmax"]) - np.maximum(a["bmin"], b["bmin"]), 0, None).prod()
     va = (a["bmax"] - a["bmin"]).prod()
@@ -189,6 +205,32 @@ def classify(o, floor):
 
 
 # ---------------------------------------------------------------- 5. Excel mapping
+NOT_ASSETS = ("PIPE", "STORAGE", "CLUTTER")  # boxes that never carry an Excel asset
+
+
+def geometry_id(objs):
+    """Fingerprint of the boxes only: object IDs stay valid while it is unchanged, even if the Excel mapping changes."""
+    geo = [[round(float(x), 3) for x in (*(o["bmin"] + o["bmax"]) / 2, *(o["bmax"] - o["bmin"]))] for o in objs]
+    return hashlib.sha1(json.dumps(geo).encode()).hexdigest()[:12]
+
+
+def apply_vision(objs, path, geo_id):
+    """Use confident labels from the browser vision pass (web/vision_labels.json) as the box class for mapping."""
+    v = json.loads(Path(path).read_text())
+    if v.get("scene_id") != geo_id:
+        print(f"[vision] {path} is for scene {v.get('scene_id')}, boxes are {geo_id}: ignored")
+        return 0
+    min_score = json.loads((Path(__file__).parents[1] / "web" / "vocab.json").read_text())["min_score"]
+    n = 0
+    for i, o in enumerate(objs):
+        f = (v["labels"].get(f"OBJ-{i:03d}") or {}).get("final")
+        if f and f.get("score", 0) >= min_score:
+            o["cls"] = "CLUTTER" if f["kind"] == "clutter" else (f["asset_class"] or f["id"])  # e.g. PROCESS_PUMP, TANK
+            o["seen"] = True
+            n += 1
+    return n
+
+
 CLASS_FALLBACK = {"PROCESS_PUMP": ["ELECTRIC_MOTOR"], "ELECTRIC_MOTOR": ["PROCESS_PUMP"],
                   "CONTROL_VALVE": ["PRESSURE_TRANSMITTER", "VIBRATION_SENSOR"],
                   "PRESSURE_TRANSMITTER": ["VIBRATION_SENSOR", "CONTROL_VALVE"]}
@@ -200,7 +242,8 @@ def map_assets(objs, xlsx, rng):
     assets = master.merge(state, on="asset_id").sort_values("health_score")
     target = assets.iloc[0].to_dict()                      # worst health = the faulty device to visit
     pool = {c: list(g.sample(frac=1, random_state=1).to_dict("records")) for c, g in assets.groupby("asset_class")}
-    order = rng.permutation(len(objs))
+    # boxes vision confirmed come first, so shape guesses don't take the assets of real pumps/valves (stable: random within)
+    order = sorted(rng.permutation(len(objs)), key=lambda i: not objs[i].get("seen"))
     for i in order:  # procedural mapping (allowed by the brief): class-compatible first, then any free asset
         o = objs[i]
         for c in [o["cls"]] + CLASS_FALLBACK.get(o["cls"], []):
@@ -208,7 +251,7 @@ def map_assets(objs, xlsx, rng):
                 o["asset"] = pool[c].pop()
                 break
     leftovers = [a for v in pool.values() for a in v]
-    free = [o for o in objs if "asset" not in o and o["cls"] not in ("PIPE", "STORAGE")]
+    free = [o for o in objs if "asset" not in o and o["cls"] not in NOT_ASSETS]
     for o, a in zip(free, leftovers):
         o["asset"] = a
     return target  # full record (master + current state), also when no box got it
@@ -281,7 +324,7 @@ def nearest_walkable(g, cell):
 
 
 # ---------------------------------------------------------------- main
-def main(ply, xlsx, outdir):
+def main(ply, xlsx, outdir, vision=None, boxes=None):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     header, props, rows = load_ply(ply)
@@ -298,8 +341,15 @@ def main(ply, xlsx, outdir):
     print(f"[grid] {g['W']}x{g['H']} cells, walkable={g['walk'].sum()} obstacle={g['obstacle'].sum()}")
 
     objs = segment_objects(w, rows, P, floor, ceil)
+    if boxes:  # union: the two segmentations find different objects (measured: 33 pieces of equipment only the ml one has)
+        extra = [b for b in load_ml_boxes(boxes) if all(box_iou_overlap(b, o) < 0.35 for o in objs)]
+        objs += extra
+        print(f"[boxes] +{len(extra)} non-overlapping boxes from {boxes} -> {len(objs)}")
     for o in objs:
         o["cls"], o["label"] = classify(o, floor)
+    geo_id = geometry_id(objs)
+    if vision:
+        print(f"[vision] {apply_vision(objs, vision, geo_id)} boxes take their class from {vision}")
     rng = np.random.default_rng(7)
     target = map_assets(objs, xlsx, rng)
     target_asset, tcls = target["asset_id"], target["asset_class"]
@@ -323,7 +373,7 @@ def main(ply, xlsx, outdir):
 
     # exact class first (wall-mounted pumps sit further from the aisle), then compatible, then any equipment box
     cands = (reachable({tcls}, 1.3) or reachable(compatible, 1.0)
-             or reachable({o["cls"] for o in objs} - {"PIPE", "STORAGE"}, 2.0))
+             or reachable({o["cls"] for o in objs} - set(NOT_ASSETS), 2.0))
     assert cands, "no equipment box within 2 m of walkable floor to place the faulty asset on"
     _, ti, goal = cands[min(len(cands) - 1, len(cands) // 8)]  # far, but not the very edge of the scan
     holder = next((o for o in objs if o.get("asset", {}).get("asset_id") == target_asset), None)
@@ -364,9 +414,8 @@ def main(ply, xlsx, outdir):
         target_object=f"OBJ-{ti:03d}", target_asset=target_asset,
         path=path,
     )
-    # fingerprint of this exact result: browser caches and video_labels.json are keyed by it,
-    # because object IDs are only stable for one pipeline run
-    scene["scene_id"] = hashlib.sha1(json.dumps(scene, sort_keys=True).encode()).hexdigest()[:12]
+    # vision_labels.json and video_labels.json are keyed by it: object IDs are valid only for these exact boxes
+    scene["scene_id"] = geo_id
     (out / "scene.json").write_text(json.dumps(scene))
     mapped = sum(1 for o in objs if o.get("asset"))
     print(f"[objects] {len(objs)} framed objects, {mapped} mapped to Excel assets, target {target_asset} -> OBJ-{ti:03d}")
@@ -394,4 +443,9 @@ def save_floorplan(path, g, objs, cells, ti):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("ply"); ap.add_argument("xlsx"); ap.add_argument("outdir")
+    ap.add_argument("--vision", help="web/vision_labels.json from the browser vision pass")
+    ap.add_argument("--boxes", help="folder with objects.json + transform.json from the ml branch: their boxes are added")
+    a = ap.parse_args()
+    main(a.ply, a.xlsx, a.outdir, a.vision, a.boxes)

@@ -23,12 +23,15 @@ sequenceDiagram
 
 ### Step by step
 1. **Prepare the data.** Copy the three starter files into `data/` with the names given in the README. Nothing in `data/` is committed.
-2. **Build the scene:** `python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web`.
+2. **Build the scene:** `python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web`. Optional `--boxes inputs/ml_segment` adds the ml branch's boxes that don't overlap ours (see the decisions log: +6 equipment, +58 clutter boxes, so off by default).
    - Read the log: sanitize counts, floor and ceiling heights, grid size, number of walkable cells, objects, route length.
    - Check `web/floorplan.png`. Green is walkable, red is obstacle, blue are boxes, the red box is the target and yellow is the route.
 3. **Extract the video frames:** `python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1`.
 4. **Serve:** `python server.py`, then open http://localhost:8000. Wait for the splat to load (~395 MB, a few seconds).
-5. **Run the vision pass once.** Press **AI labels (CLIP)**. The first run downloads the CLIP weights, indexes the video tiles (~2 min) and labels 414 boxes (~3 min). Later runs reuse the cache.
+5. **Run the vision pass once.** Press **AI labels (CLIP)**.
+   - The first run downloads CLIP B/16, indexes the video tiles (~4 min) and labels 414 boxes (~3 min). Later runs reuse the cache.
+   - The result is saved to `web/vision_labels.json`, so every viewer shows the labels without running it again.
+   - Optional: re-run the same build command with `--vision web/vision_labels.json` added. Excel assets then go onto boxes that vision recognised as pumps, valves, gauges and motors, never onto chairs, washing machines or walls. The boxes stay the same, so the labels stay valid.
 6. **Run the demo:** press **▶ Start mission** (see §3).
 7. **Optional, on a GPU PC:**
    - set up a venv with CUDA torch and `requirements-gpu.txt`;
@@ -46,6 +49,7 @@ sequenceDiagram
 
 ## 2. Verification we ran
 - Unit tests: `python -m unittest discover tests` (sanitize: clean file, garbage tail, mid-file bad block).
+- Vision benchmark: 50 hand-labelled render crops (`tests/vision_eval.json`) × 3 models × 6 variants. See HOW_IT_WORKS §2.1.
 - The pipeline asserts that the route exists and stays on walkable cells, and that a target box can be found.
 - `video_lift.py --selftest` checks the Umeyama similarity fit and the projection math.
 - Copilot retrieval ran for all 30 assets plus an unknown ID (KeyError → 404).
@@ -75,6 +79,8 @@ sequenceDiagram
 | CLIP on splat renders was weak | Crops from 0.35 m were blur | Keep the camera ≥ 0.8 m away and add 80% context: confident labels went 41 → 65. |
 | Loading CLIP stalled | fp32 weights are ~600 MB | q8 for the classifier and fp16 for the embeddings on WebGPU, which is ~4× faster than q8 there. |
 | Photo matching dominated by one frame | A blank-wall frame was the top-1 match for 105/414 boxes | CSLS hubness correction plus a threshold calibrated on pairs: confident labels 56 → 73. |
+| Vision labels wrong on obvious things (green chair → "motor", washing machine → "valve") | Only 30% correct on 50 hand-labelled crops; the old vocabulary had no class for those objects, and below the threshold the shape guess was shown | 14-class vocabulary incl. clutter, 4-template prompt ensemble, CLIP B/16 (66%), "Unidentified object" below 0.4 (74% precision), labels saved server-side and fed back into Excel mapping. |
+| Combine with the team's ml branch (Open3D: RANSAC walls, DBSCAN, yaw boxes, size-based Excel mapping) | Same CLIP pass on both box sets. ml raw: 435 boxes, 110 read as equipment, but 67 overlapping pairs; after NMS 370 boxes / 90 equipment (main: 414 / 99). The sets complement each other (33 equipment only in ml), but adding ml's non-overlapping boxes to ours gave +6 equipment and +58 wall/clutter boxes. A NumPy port of the RANSAC wall removal found no real walls in our splat points (best planes held ~2% of points, random slices). ml's size-based mapping put 15/30 assets on clutter. | Kept main's segmentation and vision-based mapping; `--boxes` stays opt-in (`inputs/ml_segment/`) to re-run the comparison as the ml branch evolves. |
 | Clicking a 3D label showed no vision data | The click handler captured the raw scene object | The handler is bound to the live object. |
 | `pandas` 3 rejected `agg("first")` | The server crashed during retrieval | Compute first/last/min/max/mean explicitly per series. |
 | Pointer Lock refused in the embedded browser | `SecurityError` | WASD/arrow walking works without pointer lock; mouse-look is optional. |
