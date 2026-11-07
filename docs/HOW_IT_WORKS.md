@@ -135,14 +135,16 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 
 This is a single static page with no build step. It loads three.js 0.180 and Spark 2.4 (a Gaussian-splat renderer for three.js) from a CDN through an import map.
 
-- **Splat:** `SplatMesh({ url })`, rotated 180° about X to match the pipeline frame. *Open splat…* loads any local file through `fileBytes`.
+- **Splat:** `SplatMesh({ url })`, rotated 180° about X to match the pipeline frame. *Export ▾ → Open another splat…* loads any local file through `fileBytes`.
 - **Boxes:** `EdgesGeometry` line boxes coloured by status: green healthy, amber warning, pulsing red target, grey unmapped, cyan discovered from video. Labels are `CSS2DObject`s.
 - **Mission:** the avatar (a capsule plus a proximity ring) moves along `path` at 0.45 m/s. On arrival it calls the copilot.
-- **Proximity display:** each frame, only boxes within **1.3 m** are visible (or all of them with *All frames*). Only the **6 nearest** get text labels, with Excel assets first, so labels never pile up. The side panel lists the nearby assets with their status chips.
-- **Cameras:** *Follow* (third person), *Orbit* (overview under the ceiling), *Walk* (first person). Walk mode moves with WASD/arrows and tests the next position against the walkable grid on each axis separately, so the user slides along walls instead of passing through them.
+- **Proximity display:** each frame, only boxes within **1.3 m** are visible (or all of them with *All objects*). Only the **6 nearest** get text labels, with Excel assets first, so labels never pile up. The side panel lists the nearby assets with their status chips.
+- **Cameras:** *Follow* (third person), *Orbit* (overview under the ceiling), *Walk* (first person). Walk mode moves with WASD/arrows and tests the next position against the walkable grid on each axis separately, so the user slides along walls instead of passing through them. The page starts in Orbit; *Start mission* switches to Follow.
+- **First-time user:** an intro dialog on the first visit (remembered in `localStorage` as `molfars-intro-seen`, reopened with **?**, closed with Esc), a frame-colour legend, the toolbar grouped as main actions / Camera / Show / AI / Export, and a welcome message in the chat with one-click suggestions (`quickActions`) instead of opening the target's card on load.
+- **Render sleep:** the loop renders only while something moves (`wake(ms)`); it stays awake 8 s after the splat finishes loading, and wakes on pointer moves over the scene and when the tab becomes visible again, so the first view is never black.
 
 ### 2.1 In-browser vision (CLIP, transformers.js)
-Pressing **AI labels (CLIP)**:
+Pressing **Re-run AI labels**:
 1. **Loads `Xenova/clip-vit-base-patch16`** (set in `web/vocab.json`) through `@huggingface/transformers` 4.3.2 on **WebGPU**, with a WASM fallback.
    - It loads the vision and the text tower: `CLIPVisionModelWithProjection` and `CLIPTextModelWithProjection`, fp16 when the GPU has `shader-f16`, q8 otherwise.
    - The browser caches the weights after the first download.
@@ -198,7 +200,7 @@ CLIP labels are the free, local baseline. With `GEMINI_API_KEY` there are three 
    - **The class is kept from the prior when the prior score is ≥ 0.40**; Gemini then only supplies the name and reason. The prior is the CLIP or rule label, never an earlier Gemini answer, so a re-run can still change Gemini's own classes (on the committed labels: 303 boxes keep their CLIP class, 111 are open to Gemini). The stored score is Gemini's own score for its class, or the prior's score when the prior class is kept. (The committed labels were made with an older floor of 0.55, see below.)
    - This was run for the committed labels: 401 of 414 boxes carry a Gemini label, the other 13 a refinement rule.
 2. **One object — button *Gemini Vision (object)* in an object's chat card → `POST /api/vision/gemini`.** It sends the live render crop plus the matched video tile.
-3. **The current view — button *Gemini scan view* → `POST /api/vision/gemini-scene`.** It sends the screenshot plus up to 30 projected candidate boxes; Gemini returns up to 14 detections, each matched to an object ID or null.
+3. **The current view — button *✨ Scan this view* → `POST /api/vision/gemini-scene`.** It sends the screenshot plus up to 30 projected candidate boxes; Gemini returns up to 14 detections, each matched to an object ID or null.
 
 Paths 2 and 3 update `vision_labels.json` **and** `scene.json` on the server, so the next viewer sees the new labels at once.
 

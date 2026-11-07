@@ -20,7 +20,7 @@ We turn a raw 3D Gaussian Splatting scan of Valmet's Messukylä boiler/equipment
 | Obstacle-aware navigation & proximity (25%) | Floor/obstacle occupancy grid from the splat, an A* route with clearance cost, live 1.3 m proximity radius, collision-checked first-person walk mode, and an **inspection tour** over all 13 non-healthy assets ranked by condition × criticality × uncertainty (Builder Question Q-04). |
 | AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`; confidence drops with data-quality flags and a weak 3D identity (Builder Question Q-06); one click drafts a work order (Q-05). The copilot **comments on every asset the avatar passes**, **checks every cited ID** against the retrieved evidence, and runs its own **telemetry anomaly detector** (AUC 0.91 against the pack's labels, Q-02). |
 | Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose, SQLite fallback) implementing every route of the pack's `API_Contract` sheet, live telemetry ingest + MQTT bridge (Q-07), OpenUSD export (Q-09), a static three.js + Spark viewer, `docker compose up` for everything, and CI on every push. |
-| Demo clarity (10%) | One-click mission (Start → walk → arrive → diagnosis → work-order draft), Follow / Orbit / Walk cameras, real-photo asset cards, a scripted **🎬 Demo** mode with captions for the video, a noise-free **🧱 BIM view** from above, **navigation by text** (“go to the nearest degraded valve”, also in Ukrainian), 8 slides in `docs/`. |
+| Demo clarity (10%) | A first-visit intro (what this is, four steps, colours, keys; reopen with **?**), a grouped toolbar with one highlighted main action, a colour legend, plain-language mission card and one-click suggestions in the chat. One-click mission (Start → walk → arrive → diagnosis → work-order draft), Follow / Orbit / Walk cameras, real-photo asset cards, a scripted **🎬 Guided demo** with captions for the video, a noise-free **🧱 BIM view** from above, **navigation by text** (“go to the nearest degraded valve”, also in Ukrainian), 8 slides in `docs/`. |
 
 ## Quick start
 
@@ -46,7 +46,7 @@ python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1         
 docker compose up -d                                                                 # PostgreSQL 16 on :5432
 python seed_db.py                                                                    # Excel pack -> 14 tables
 python server.py                                                                     # FastAPI on http://localhost:8000
-# in the viewer: press "AI labels (CLIP)" once; then optionally map Excel by what vision saw:
+# vision labels ship in web/vision_labels.json; after a rebuild press "Re-run AI labels" once, then optionally map Excel by what vision saw:
 python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web --vision web/vision_labels.json
 # optional, needs GEMINI_API_KEY: Gemini names every box, then rebuild so the mapping uses it
 python pipeline/gemini_vision.py && python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web
@@ -59,21 +59,25 @@ Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) 
 **No Docker?** Skip the two database lines. When PostgreSQL (or psycopg) is not available and `DATABASE_URL` is not set, `server.py` seeds `work/builder_pack.sqlite` from the same Excel file and runs the same SQL on it, so the demo never loses its copilot.
 
 ### Using the viewer
-- **▶ Start mission**: the avatar walks to the faulty pump P-005; the copilot diagnoses on arrival.
-- **Follow / Orbit / Walk (WASD, arrows)**: Walk mode collides with the nav grid.
-- **All frames**: shows every 3D box. Otherwise only boxes inside the proximity radius are shown, with labels on the 6 nearest.
-- **AI labels (CLIP)**: runs the in-browser vision pass, ~5 min the first time, cached after that.
-- **Gemini scan view** / **Gemini Vision (object)**: asks Gemini about the current view or one object and saves the label on the server (needs `GEMINI_API_KEY`).
-- **Selecting an asset**: click a label or a proximity row. The card shows the 3D render and the matched real video photo, and you can ask the copilot about that asset.
+On the first visit an intro explains the demo in four steps and offers **▶ Start mission**, **🎬 Guided demo** or **Explore on my own**; the **?** button opens it again. The scene starts in an Orbit overview of the whole room; a legend in the corner explains the frame colours (red fault, amber warning, green healthy, grey not in Excel). Every button has a tooltip.
+
+The toolbar, left to right:
+- **▶ Start mission** (highlighted): the avatar walks to the faulty pump P-005; the camera switches to Follow and the copilot diagnoses on arrival. The mission card under the toolbar says the fault, health and walk length in plain words.
 - **🧭 Inspection tour**: walks to all non-healthy assets, urgent first; each stop shows its priority and why.
-- **🔎 Isolate** (in an asset card): only that object's splats, to orbit around it; Esc returns.
-- **🎬 Demo**: a 6-step scripted walkthrough with captions (overview, floor plan, mission, diagnosis, isolation, tour), for recording the video in one take.
-- **🧱 BIM view**: hides the splat and shows solid blocks (red fault, amber warning, green healthy, class colours otherwise) on the walkable floor, from above.
-- **📐 Plan** / **⬇ IFC**: the semantic floor plan with section A-A (SVG), and the Scan-to-BIM model (IFC4) for Revit, Bonsai/BlenderBIM, Solibri or any IFC viewer.
+- **🎬 Guided demo**: a 6-step scripted walkthrough with captions (overview, floor plan, mission, diagnosis, isolation, tour), for recording the video in one take.
+- **Camera: Follow / Orbit / Walk** (WASD, arrows): Walk mode collides with the nav grid.
+- **Show: All objects**: frames every detected object. Otherwise only frames inside the proximity radius are shown, with labels on the 6 nearest (name only; the confidence is in the label's tooltip).
+- **Show: 🧱 BIM view**: hides the splat and shows solid blocks (status colours for assets, class colours otherwise) on the walkable floor, from above.
+- **Show: 🗺️ Mini-map**: the 2D floor plan with the route; **⛶ Enlarge** makes it bigger.
+- **AI: Re-run AI labels**: runs the in-browser CLIP vision pass again (~5 min the first time; the saved labels load without it).
+- **AI: ✨ Scan this view**: asks Gemini to name the objects in the current view and saves the labels on the server (needs `GEMINI_API_KEY`).
+- **⬇ Export ▾**: 📐 floor plan + section A-A (SVG), 🏗️ BIM model (IFC4, for Revit, Bonsai/BlenderBIM, Solibri), 🌐 OpenUSD (`.usda` for Omniverse, Unity, Unreal, Blender), and 📂 Open another splat (any local `.ply/.spz/.splat`).
+
+In the chat and the asset card:
+- **Welcome suggestions**: one-click Start mission, Diagnose P-005, Go to the nearest degraded valve, Inspection tour and BIM view.
 - **Chat navigation**: type “go to the nearest degraded valve”, “take me to P-005”, “find the washing machine”, “знайди драбину”; the avatar walks the shortest real route (A* in the browser). Questions without a movement verb still go to the copilot.
-- **⬇ PLY** (in an asset card): that object's splats as a standalone `.ply`.
-- **⬇ OpenUSD**: downloads the semantic layer as `.usda` for Omniverse, Unity, Unreal or Blender.
-- **Open splat…**: views any `.ply/.spz/.splat` file.
+- **Selecting an asset**: click a label or a proximity row. The card shows the 3D render and the matched real video photo, and you can ask the copilot about that asset.
+- **Card buttons**: ✨ Gemini Vision (object), 🔍 Inspect (copilot), 📝 Work-order draft, 🔎 Isolate (only that object's splats, to orbit around it; Esc returns) and ⬇ PLY (that object's splats as a standalone `.ply`).
 
 ## Optional: multi-view labels on a GPU PC (`video_lift.py`)
 
@@ -167,7 +171,7 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 - **The committed Gemini scores are inflated.** They were made when `gemini_vision.py` still stored at least 0.55, so every box shows a name. The script now stores Gemini's own score; re-run it (needs a key) to get honest scores and "Unidentified object" back. Part of `refine_vision` is coordinate rules for this room; they switch off automatically on any other scan (17 of 414 labels here depend on them).
 - **The Gemini vision endpoints write `scene.json` and `vision_labels.json` on the server.** Commit them only on purpose; a fresh `build_scene.py` run recomputes `scene.json` from the labels.
 - **The original starter `Industrial Boiler Room.ply` is two-thirds corrupted.** It is random bytes after vertex 502,483, so half the room is missing. Use `Equipment Room.ply`; the pipeline detects and trims the broken file.
-- **Not seen live here:** the narration while walking, the tour and the 🎬 Demo steps after the start were checked by code paths and unit tests, but the browser pane on the dev laptop was hidden, so the animation itself did not run. The Docker image was not built on the dev laptop (no Docker engine running); CI is defined but runs on the first push.
+- **Not seen live here:** the narration while walking, the tour and the 🎬 Guided demo steps after the start were checked by code paths and unit tests, but the browser pane on the dev laptop was hidden, so the animation itself did not run. The Docker image was not built on the dev laptop (no Docker engine running). The layout was checked at 1440×900; below ~1200 px the mini-map and the legend cover a noticeable part of the scene.
 - **The detector is modest on P-005:** its fouling shows as a slow flow drift; the detector ranks it 14th of 30, and the report says so.
 - **OpenUSD export** is checked for structure locally and opened with `usd-core` in CI only (no ARM wheel). The IFC export was validated with ifcopenshell 0.9 locally and is again in CI; it was not opened in Revit.
 - **Text navigation** understands tags, ~13 object kinds and 6 conditions by keywords (English, Ukrainian); it is not an LLM, so free phrasing outside those words falls back to the copilot or a short help line.

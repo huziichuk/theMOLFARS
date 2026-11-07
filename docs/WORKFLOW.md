@@ -33,7 +33,7 @@ sequenceDiagram
 4. **Start the database and serve:**
    - `docker compose up -d` (PostgreSQL), then `python seed_db.py` (loads the Excel pack; re-run after changing it). Without Docker skip this: the server falls back to SQLite seeded from the same Excel.
    - `python server.py`, then open http://localhost:8000. Wait for the splat to load (9.4 MB `.spz`).
-5. **Run the vision pass once.** Press **AI labels (CLIP)**.
+5. **Run the vision pass (only after a rebuild).** The committed labels load by themselves; after `build_scene.py` changes the boxes, press **Re-run AI labels**.
    - The first run downloads CLIP B/16, indexes the video tiles (~4 min) and labels 414 boxes (~3 min). Later runs reuse the cache.
    - The result is saved to `web/vision_labels.json`, so every viewer shows the labels without running it again.
    - Optional: re-run the same build command with `--vision web/vision_labels.json` added. Excel assets then go onto boxes that vision recognised as pumps, valves, gauges and motors, never onto chairs, washing machines or walls. The boxes stay the same, so the labels stay valid.
@@ -48,13 +48,14 @@ sequenceDiagram
 
 ### Re-running after changes
 - Changing the splat, the Excel file or a pipeline parameter needs only step 2 again. Then do a hard reload in the browser.
-- Caches never outlive their input. Vision labels and `video_labels.json` are tied to `scene_id` (a hash of the box geometry, so a re-map with `--vision` keeps them valid), and the video tile embeddings to a hash of the source video. After a rebuild, re-run **AI labels** and, if you use it, `video_lift.py`.
+- Caches never outlive their input. Vision labels and `video_labels.json` are tied to `scene_id` (a hash of the box geometry, so a re-map with `--vision` keeps them valid), and the video tile embeddings to a hash of the source video. After a rebuild, press **Re-run AI labels** and, if you use it, `video_lift.py`.
 - Tunable constants:
   - pipeline: top of `build_scene.py` (`VOXEL`, `COLOR_TOL`, `MIN_PTS`, `CELL`, `ROBOT_R`, `HEAD`);
   - vision: `model`, `min_score`, `proto_weight`, classes and prompts in `web/vocab.json`; refinement rules in `refine_vision` (`build_scene.py`);
   - viewer: `RADIUS`, `MAX_LABELS`, `SIM_MIN` in `index.html`.
 
 ## 2. Verification we ran
+- UX pass (first-time user): 23 unit tests again, all passing. In the browser at 1440×900: the intro on first visit (and not again after it is closed, **?** reopens it), the grouped toolbar and the Export menu links, the legend, the plain-language mission card, the welcome suggestions, labels without percentages, the Orbit start view, and no console errors.
 - Round 4 (after the Discord channel): 23 unit tests. IFC export (no dangling references, one Pset_Semantic3D per object; with ifcopenshell: schema-valid and the target is an IfcPump tagged P-005; rotated elements checked against their PCA frame by hand), the SVG plan parses as XML, and `.spz` decodes back to the PLY values. In the browser: BIM view, the plan, 9 typed navigation commands (including Ukrainian, a question with a tag that must go to the copilot, and an unknown target), isolation and the per-object PLY download, and the scene loading from `.spz`.
 - Round 3 (items 1–10): 21 unit tests now. New: Q-04 priority ordering and the saved tour (urgent first, path indices increasing), the Q-02 detector (a late step is flagged, a noisy stable signal is not), the citation check (an invented `EVT-99999` is flagged; the offline report and narration verify fully), oriented frames (45° plank gets a yaw, an axis-aligned one does not), groups (touching parts join, assets never), the Drive download (a `.ply` is kept, an HTML page is refused), USD export, and live telemetry ingest (stored, read back, a non-column key refused). A CI dry run without `data/` passes with the 6 database tests skipped.
 - In the browser: narration lines and citation marks, the tour intro, sparklines, isolation (only P-005's 751 splats shown; Esc returns) and the first three 🎬 Demo steps were checked; the walking animation itself was not (hidden pane).
@@ -79,9 +80,9 @@ sequenceDiagram
   - non-Chromium browsers.
 
 ## 3. Demo script (≤ 5 min video)
-**🎬 Demo** in the viewer plays steps 1–4, the isolation of P-005 and the start of the inspection tour by itself, with captions (~2 min). Record it, then add 5–6 by hand. Keep the browser tab visible: hidden tabs pause the animation.
+**🎬 Guided demo** in the viewer plays steps 1–4, the isolation of P-005 and the start of the inspection tour by itself, with captions (~2 min). Record it, then add 5–6 by hand. Keep the browser tab visible: hidden tabs pause the animation.
 
-1. **Overview (Orbit, All frames):** the full room with 414 boxes. Mention the colour-aware segmentation and NMS.
+1. **Overview (Orbit, All objects):** the full room with 414 boxes. Mention the colour-aware segmentation and NMS.
 2. **Floor plan slide:** the grid, the obstacles and the A* route.
 3. **▶ Start mission (Follow):** frames light up only within the radius, and the side panel lists nearby assets with their Excel status.
 4. **Arrival at P-005:** the copilot report, with its 4 sections and evidence IDs. Ask a follow-up question.
