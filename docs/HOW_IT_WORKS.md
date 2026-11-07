@@ -102,6 +102,16 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 - **String-pulling:** the route is shortened by line of sight through walkable cells only (they already carry the avatar radius).
 - Self-checks: the route must exist and every cell on it must be walkable (`assert`).
 
+### 1.6a Inspection tour (Builder Question Q-04)
+- **Priority** = `(1 − health/100) × criticality weight (A 1.0, B 0.75, C 0.5) × (1 + (1 − model_confidence))`: damage times importance, and an uncertain diagnosis is worth checking sooner. The same function ranks `/api/priorities`.
+- **Order:** urgency level first (high → medium → routine, from `Current_State`), then inside each level the nearest next stop by real A* path length (greedy).
+- Every non-healthy asset whose box is within 1.5 m of the floor is a stop; the rest are listed as unreachable. Result: 13 stops, 57.2 m, saved as `tour` in `scene.json` with each stop's path index.
+
+### 1.6b Frames: groups and orientation (display layer)
+- **Groups:** boxes of one vision class without an Excel asset that touch (≤ 3 cm) are union-found into one multi-part object (`GRP-…`): 49 groups from 129 fragments (pipe runs, shelves, walls). The viewer draws one frame per group.
+- **Oriented frames:** a PCA of each object's floor footprint gives a yaw; when the rotated box covers < 80 % of the axis-aligned floor area it is stored as `obb` (88 boxes).
+- Both are display-only: navigation, mapping and `scene_id` keep the raw axis-aligned boxes, so every saved vision label stays valid.
+
 ### 1.7 `scene.json` format
 ```jsonc
 {
@@ -247,6 +257,12 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
 | GET | `/api/assets/{asset_id}/documents` | RAG-ready knowledge: its asset card, its class guidance and the site-wide docs (`RAG_Corpus_Index` + `Knowledge_Docs` text) |
 | GET | `/api/scene/anchors` | `Scene_Anchors` rows, each with the real 3D box it was mapped to (`object_id`, centre, size, vision class, identity confidence, `scene_id`) |
 | POST | `/api/copilot` (also `/api/copilot/query`) | `{asset_id \| object_id, question?, history?}` → `{mode, answer}`. `object_id` is for boxes with no Excel asset: Gemini gets the vision label, size, height and the 4 nearest registered assets |
+| GET | `/api/assets/{asset_id}/brief` | one cited status line (used while walking past) + its citation check |
+| GET | `/api/assets/{asset_id}/anomalies` | the Q-02 detector: score, per-signal z_level / z_trend / flag, 1 h series |
+| GET | `/api/priorities` | all 30 assets ranked by the Q-04 rule, with the reason |
+| GET | `/api/objects/{object_id}/splat.ply` | only the splats inside that object's (or its group's) frame, for 🔎 Isolate; cached in `work/isolate/` |
+| GET | `/api/scene/export.usda` | the semantic layer as OpenUSD (Q-09) |
+| POST | `/api/telemetry` | `{asset_id, timestamp?, values, source?}` → appends one live reading (Q-07) |
 | POST | `/api/work-orders/draft` | `{asset_id}` → a work-order **draft** in the `Maintenance_History` shape: priority from urgency, action, numbered steps (lockout first, cases, doc, data-quality checks), evidence IDs, confidence. Nothing is stored or sent |
 | GET | `/health` | `{status: "ok"}` |
 
@@ -262,6 +278,24 @@ There are only 30 assets, so we use no vector store. For the asset ID the server
 
 The result is about 11 k characters of JSON, and every row keeps its evidence ID.
 
+### Telemetry anomaly detector (Builder Question Q-02)
+Per signal of the 3-day telemetry: the first 2 days are the baseline (median, MAD); `z_level` = the last 6 h median against it, `z_trend` = the change of a line through 6 h medians over the window, both in robust baseline units. A signal is flagged at ≥ 2 units; the asset score is the RMS of the per-signal max over all signals. The pack's condition labels are never used, so they can grade it:
+
+| Variant | AUC non-healthy vs healthy (30 assets) | P-005 rank |
+|---|---|---|
+| level only | 0.89 | 25 / 30 |
+| **level + trend (shipped)** | **0.91** | 14 / 30 |
+
+The report and the asset card show the score and the flagged signals; the card draws 3-day sparklines with the baseline shaded and the flagged tail in red (`/api/assets/{id}/anomalies`).
+
+### Narration and citation check
+- **Narration:** while the avatar walks, every Excel asset entering the radius gets one deterministic, cited line from `/api/assets/{id}/brief` (state, health, issue, strongest moving signal, last alarm ID). Tour stops get a stop line with the priority and why.
+- **Citation check:** every answer (Gemini or offline) is scanned for `[ASSET|EVT|WO|CASE|DOC|DQ-…]` IDs and compared with the IDs in the retrieved context; the response carries `citations: {verified, unknown}`. The viewer strikes unknown IDs through in red and prints "✓ N cited IDs verified" or "⚠ … not in the evidence". The offline report and the narration lines verify 100 % by construction (tested).
+
+### Live data and portability (Q-07, Q-09)
+- `POST /api/telemetry {asset_id, timestamp?, values}` appends a reading to the same table the pack filled (known numeric columns only); the detector, copilot and sparklines see it at once. `pipeline/mqtt_bridge.py` forwards MQTT topics `plant/<ASSET>/telemetry`; an OPC UA client would post the same way.
+- `GET /api/scene/export.usda` (and `pipeline/export_usd.py`): every frame as a scaled, yaw-rotated `Cube` with `valmet:*` attributes (object, vision class, asset, condition, health), plus the mission route and the tour as `BasisCurves`; Y-up, metres.
+
 ### Confidence (Builder Question Q-06)
 Every context carries `confidence`: the pack's `model_confidence`, scaled down by each open data-quality flag of the asset (high ×0.85, medium ×0.93, low ×0.97), and the 3D identity (the vision score of the box the asset was mapped to). The overall value is the lower of the two: a diagnosis is only as sure as the data behind it and the certainty that this box is that device. For P-005: 0.91 → 0.43 after 9 flags; identity 0.55; overall 0.43. The offline report prints the breakdown; Gemini is told to state it and say why it is lower.
 
@@ -271,6 +305,11 @@ Every context carries `confidence`: the pack's `model_confidence`, scaled down b
   - It lists telemetry signals that moved by more than 8%, and the last alarms and work orders.
   - Steps come from the matching historical cases and the knowledge doc, preceded by permit and lockout.
   - It ends with all data-quality flags.
+
+### Setup automation
+- **Splat from Google Drive:** `build_scene.py` and `server.py` call `pipeline/fetch_data.py` when the scan is missing; it downloads to a `.part` file, checks the `ply` magic (Drive returns an HTML page when a link is not public), then renames, so an interrupted download is retried.
+- **`docker compose up --build`:** PostgreSQL + the app (`Dockerfile`, Python 3.12); the app seeds the database and, on first start, downloads the splat and builds the scene. Ports are bound to 127.0.0.1.
+- **CI:** `.github/workflows/tests.yml` runs the unit tests on every push (with `usd-core`, so the USD export is opened by a real USD parser).
 
 ### Hardening
 - **Every POST must be `Content-Type: application/json`, otherwise 415.** Any website open in the same browser could otherwise send a `text/plain` POST to `localhost:8000` (CSRF) and overwrite the labels or spend the Gemini quota; a JSON POST from another site needs a CORS preflight, which this server never approves.

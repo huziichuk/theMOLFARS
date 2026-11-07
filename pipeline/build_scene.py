@@ -155,8 +155,62 @@ def segment_objects(w, rows, P, floor, ceil):
         lo, hi = np.percentile(q, 2, 0), np.percentile(q, 98, 0)  # trim stray splats from the frame
         ext = (hi - lo).max()
         if 0.08 < ext < 2.5:  # skip specks and wall/ceiling slabs
-            out.append(dict(bmin=lo, bmax=hi, nvox=len(q), color=col[plab == k].mean(0)))
+            out.append(dict(bmin=lo, bmax=hi, nvox=len(q), color=col[plab == k].mean(0), obb=oriented_box(q, lo, hi)))
     return nms(out)
+
+
+def oriented_box(q, lo, hi):
+    """Yaw-oriented box from a PCA of the points' floor footprint, when it is clearly tighter than the axis-aligned
+    one (< 80 % of its floor area), else None. Display only: nav, mapping and scene_id keep the axis-aligned box."""
+    xz = q[:, [0, 2]]
+    m = xz.mean(0)
+    vals, vecs = np.linalg.eigh(np.cov((xz - m).T))
+    yaw = float(np.arctan2(vecs[1, 1], vecs[0, 1]))  # direction of the main axis in the x-z plane
+    R = np.array([[np.cos(yaw), np.sin(yaw)], [-np.sin(yaw), np.cos(yaw)]])
+    u = (xz - m) @ R.T
+    ulo, uhi = np.percentile(u, 2, 0), np.percentile(u, 98, 0)
+    if (uhi - ulo).prod() > 0.8 * (hi[0] - lo[0]) * (hi[2] - lo[2]):
+        return None
+    cx, cz = m + R.T @ ((ulo + uhi) / 2)
+    return dict(center=[float(cx), float((lo[1] + hi[1]) / 2), float(cz)],
+                size=[float(uhi[0] - ulo[0]), float(hi[1] - lo[1]), float(uhi[1] - ulo[1])], yaw=round(yaw, 4))
+
+
+def group_fragments(objs, gap=0.03):
+    """Boxes of one vision class that touch (within gap) and carry no Excel asset are parts of one physical thing
+    (a pipe run, a shelf, a wall): union-find them into groups that the viewer frames once."""
+    n = len(objs)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    kind = [o.get("vision_id", o["cls"]) for o in objs]
+    for i in range(n):
+        if objs[i].get("asset"):
+            continue
+        for j in range(i + 1, n):
+            if objs[j].get("asset") or kind[i] != kind[j]:
+                continue
+            if np.all(objs[i]["bmin"] - gap <= objs[j]["bmax"]) and np.all(objs[j]["bmin"] - gap <= objs[i]["bmax"]):
+                parent[find(i)] = find(j)
+    members = {}
+    for i in range(n):
+        members.setdefault(find(i), []).append(i)
+    groups = []
+    for ids in members.values():
+        if len(ids) < 2:
+            continue
+        gid = f"GRP-{len(groups):03d}"
+        for i in ids:
+            objs[i]["group"] = gid
+        groups.append(dict(id=gid, members=[f"OBJ-{i:03d}" for i in ids], vision_id=kind[ids[0]],
+                           bmin=[round(float(v), 3) for v in np.min([objs[i]["bmin"] for i in ids], 0)],
+                           bmax=[round(float(v), 3) for v in np.max([objs[i]["bmax"] for i in ids], 0)]))
+    return groups
 
 
 def load_ml_boxes(folder):
@@ -470,7 +524,7 @@ def asset_fit_score(o, asset_cls):
 
 def map_assets(objs, xlsx, rng):
     master = pd.read_excel(xlsx, "Asset_Master")
-    state = pd.read_excel(xlsx, "Current_State")[["asset_id", "health_score", "condition_state", "issue_code", "urgency"]]
+    state = pd.read_excel(xlsx, "Current_State")[["asset_id", "health_score", "condition_state", "issue_code", "urgency", "model_confidence"]]
     assets = master.merge(state, on="asset_id").sort_values("health_score")
     target = assets.iloc[0].to_dict()                      # worst health = the faulty device to visit
     used = set()
@@ -541,6 +595,60 @@ def line_free(g, a, b):
         if not g["walk"][c]:
             return False
     return True
+
+
+CRITICALITY_WEIGHT = {"A": 1.0, "B": 0.75, "C": 0.5}  # Asset_Master.criticality starts with A/B/C
+URGENCY_ORDER = {"high": 0, "medium": 1, "routine": 2}
+
+
+def priority(health, criticality, model_confidence):
+    """Builder question Q-04: rank work by condition, criticality and uncertainty.
+    risk = how unhealthy x how critical; an uncertain diagnosis (low model confidence) is worth checking sooner."""
+    risk = (1 - float(health) / 100) * CRITICALITY_WEIGHT.get(str(criticality)[:1], 0.75)
+    return round(risk * (2 - float(model_confidence)), 3)
+
+
+def polyline_length(path):
+    return float(sum(np.linalg.norm(np.subtract(a, b)) for a, b in zip(path, path[1:])))
+
+
+def plan_tour(g, objs, start, floor):
+    """Q-04 inspection tour over every reachable non-healthy asset: urgent first, the shortest walk inside each
+    urgency level (greedy nearest stop by real path length)."""
+    todo, skipped = [], []
+    for i, o in enumerate(objs):
+        a = o.get("asset")
+        if not a or a["condition_state"] == "healthy":
+            continue
+        c = world_to_cell(g, (o["bmin"] + o["bmax"]) / 2)
+        goal = nearest_walkable(g, c)
+        if np.hypot(goal[0] - c[0], goal[1] - c[1]) * CELL > 1.5:  # nobody can reach it from the floor
+            skipped.append(a["tag"])
+            continue
+        todo.append(dict(i=i, goal=goal, a=a, p=priority(a["health_score"], a["criticality"], a["model_confidence"])))
+    path, stops, here = [cell_to_world(g, start, floor)], [], start
+    for tier in sorted({URGENCY_ORDER.get(t["a"]["urgency"], 1) for t in todo}):
+        left = [t for t in todo if URGENCY_ORDER.get(t["a"]["urgency"], 1) == tier]
+        while left:
+            legs = []
+            for t in left:
+                cells = astar(g, here, t["goal"])
+                if cells:
+                    way = [cell_to_world(g, c, floor) for c in smooth(g, cells)]
+                    legs.append((polyline_length(way), way, t))
+            if not legs:
+                skipped += [t["a"]["tag"] for t in left]
+                break
+            length, way, t = min(legs, key=lambda leg: leg[0])
+            path += way[1:]
+            a = t["a"]
+            stops.append(dict(asset_id=a["asset_id"], tag=a["tag"], object_id=f"OBJ-{t['i']:03d}", priority=t["p"],
+                              urgency=a["urgency"], condition_state=a["condition_state"], health_score=int(a["health_score"]),
+                              criticality=a["criticality"], model_confidence=float(a["model_confidence"]),
+                              leg_m=round(length, 2), path_index=len(path) - 1))
+            here = t["goal"]
+            left.remove(t)
+    return dict(stops=stops, path=path, length_m=round(polyline_length(path), 2), skipped=skipped)
 
 
 def smooth(g, cells):
@@ -645,6 +753,11 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     path = [cell_to_world(g, c, floor) for c in way]
     plen = sum(np.linalg.norm(np.subtract(a, b)) for a, b in zip(path, path[1:]))
     print(f"[route] {len(cells)} grid steps -> {len(way)} waypoints, {plen:.1f} m")
+    groups = group_fragments(objs)
+    print(f"[groups] {len(groups)} multi-part objects from {sum(len(x['members']) for x in groups)} fragments; "
+          f"{sum(1 for o in objs if o.get('obb'))} boxes oriented by PCA")
+    tour = plan_tour(g, objs, start, floor)
+    print(f"[tour] {len(tour['stops'])} stops, {tour['length_m']:.1f} m" + (f", unreachable: {tour['skipped']}" if tour["skipped"] else ""))
 
     def jsonable(v):
         if isinstance(v, (np.integer,)): return int(v)
@@ -661,6 +774,7 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
         objects=[dict(id=f"OBJ-{i:03d}", cls=o["cls"], label=o["label"], shape_label=o.get("shape_label", o["label"]),
                       reason=o.get("reason", ""), vision_source=o.get("vision_source", "shape"),
                       vision_id=o.get("vision_id", o["cls"]), vision_score=o.get("vision_score", 0.5),
+                      obb=o.get("obb"), group=o.get("group"),
                       center=[round(float(x), 3) for x in (o["bmin"] + o["bmax"]) / 2],
                       size=[round(float(x), 3) for x in (o["bmax"] - o["bmin"])],
                       color=[round(float(x), 3) for x in o["color"]],
@@ -668,6 +782,8 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
                  for i, o in enumerate(objs)],
         target_object=f"OBJ-{ti:03d}", target_asset=target_asset,
         path=path,
+        tour=tour,  # Q-04 inspection tour over every non-healthy asset
+        groups=groups,  # multi-part objects (display layer; object IDs and scene_id unchanged)
     )
     # vision_labels.json and video_labels.json are keyed by it: object IDs are valid only for these exact boxes
     scene["scene_id"] = geo_id
@@ -743,4 +859,7 @@ if __name__ == "__main__":
     ap.add_argument("--vision", help="vision_labels.json (default: <outdir>/vision_labels.json if present)")
     ap.add_argument("--boxes", help="folder with objects.json + transform.json from the ml branch: their boxes are added")
     a = ap.parse_args()
+    if not Path(a.ply).exists():  # fresh clone: the splat is not in git, get it from the team's Google Drive
+        from fetch_data import fetch_ply
+        fetch_ply(Path(a.ply))
     main(a.ply, a.xlsx, a.outdir, a.vision, a.boxes)

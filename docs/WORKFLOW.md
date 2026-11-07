@@ -25,7 +25,7 @@ sequenceDiagram
 ```
 
 ### Step by step
-1. **Prepare the data.** Copy the three starter files into `data/` with the names given in the README. Nothing in `data/` is committed.
+1. **Prepare the data.** Copy `builder_pack.xlsx` and `boiler_room_360.mp4` into `data/` (names in the README); the splat downloads itself from the team's Google Drive. Nothing in `data/` is committed. With Docker, `docker compose up --build` does steps 2, 4 and the server in one go.
 2. **Build the scene:** `python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web`. Optional `--boxes inputs/ml_segment` adds the ml branch's boxes that don't overlap ours (see the decisions log: +6 equipment, +58 clutter boxes, so off by default).
    - Read the log: sanitize counts, floor and ceiling heights, grid size, number of walkable cells, objects, route length.
    - Check `web/floorplan.png`. Green is walkable, red is obstacle, blue are boxes, the red box is the target and yellow is the route.
@@ -55,6 +55,8 @@ sequenceDiagram
   - viewer: `RADIUS`, `MAX_LABELS`, `SIM_MIN` in `index.html`.
 
 ## 2. Verification we ran
+- Round 3 (items 1–10): 21 unit tests now. New: Q-04 priority ordering and the saved tour (urgent first, path indices increasing), the Q-02 detector (a late step is flagged, a noisy stable signal is not), the citation check (an invented `EVT-99999` is flagged; the offline report and narration verify fully), oriented frames (45° plank gets a yaw, an axis-aligned one does not), groups (touching parts join, assets never), the Drive download (a `.ply` is kept, an HTML page is refused), USD export, and live telemetry ingest (stored, read back, a non-column key refused). A CI dry run without `data/` passes with the 6 database tests skipped.
+- In the browser: narration lines and citation marks, the tour intro, sparklines, isolation (only P-005's 751 splats shown; Esc returns) and the first three 🎬 Demo steps were checked; the walking animation itself was not (hidden pane).
 - Unit tests: `python -m unittest discover tests`:
   - sanitize: clean file, garbage tail, mid-file bad block;
   - saved outputs (`SavedVisionLabels`): labels match the scene, ≥ 75% on the benchmark, every object has vision fields, all 30 assets sit on equipment. No Gemini wording is asserted, so re-running `gemini_vision.py` keeps them green;
@@ -76,12 +78,15 @@ sequenceDiagram
   - non-Chromium browsers.
 
 ## 3. Demo script (≤ 5 min video)
+**🎬 Demo** in the viewer plays steps 1–4, the isolation of P-005 and the start of the inspection tour by itself, with captions (~2 min). Record it, then add 5–6 by hand. Keep the browser tab visible: hidden tabs pause the animation.
+
 1. **Overview (Orbit, All frames):** the full room with 414 boxes. Mention the colour-aware segmentation and NMS.
 2. **Floor plan slide:** the grid, the obstacles and the A* route.
 3. **▶ Start mission (Follow):** frames light up only within the radius, and the side panel lists nearby assets with their Excel status.
 4. **Arrival at P-005:** the copilot report, with its 4 sections and evidence IDs. Ask a follow-up question.
 5. **Click a nearby asset:** the 3D render next to the real video photo, plus the vision label.
 6. **Walk mode:** walking into a wall stops you. That is the collision check against the nav grid.
+7. **🧭 Inspection tour / 🔎 Isolate / sparklines:** the Q-04 order with reasons, one object on its own, the detector's flagged signals in a card.
 
 ## 4. Decisions log (what we found and changed)
 
@@ -102,6 +107,12 @@ sequenceDiagram
 | Gemini endpoints froze the server and could lose labels | The blocking SDK call ran on the event loop; files were read before the call and written after | Call in a worker thread and re-read the files right before the write; 5 MB body limit; scores clamped. |
 | Audit (ponytail): any website could overwrite labels on the local server and inject HTML through them | A cross-site `text/plain` POST got 200 and left 1 of 414 labels; an `<img onerror>` label was rendered as HTML | JSON-only POSTs (415 otherwise), labels escaped in the viewer, Postgres bound to localhost, splat revalidated instead of re-downloaded, Gemini score floor removed, room-specific rules gated by `scene_id`, one shared room note and class rule, copilot body and history capped, an asset-mapping test. |
 | A third of the floor looked unused | Cell classes: 28% obstacle, 43% avatar-radius margin, 8% free but cut off, 22% walkable. The margin was measured to whole 10 cm cells, so every gap looked 10–15 cm narrower than it is; the corridor along the equipment wall (a 0.9 m gap between a pipe bend and a shelf, seen in a cross-section of the splat) was cut off | Clearance measured to the real obstacle splats with a k-d tree, same 0.22 m person radius: 2,276 walkable cells (+59%). The route now runs along the equipment wall and passes 14 assets instead of 5. The target stays on a pump-shaped box far from the start. |
+| The copilot spoke only at the end of the walk; the brief asks it to explain status along the path | 14 assets pass the radius on the route and only P-005 was explained | One cited, deterministic line per asset as it enters the radius (`/brief`), no LLM call per asset. |
+| Grounding was claimed, not checked | Nothing stopped a model from citing an ID that is not in the data | Every answer's IDs are checked against the retrieved context; unknown ones are struck through. |
+| One target does not show work planning (Q-04) | 13 assets are not healthy | Priority = damage × criticality × (1 + uncertainty); a tour over all of them, urgent first, shortest walk inside each level (57 m). |
+| We only repeated the pack's own diagnosis (Q-02) | `model_confidence` comes from the pack | A robust level + trend detector on the raw telemetry: AUC 0.91 against the pack's labels without seeing them; weak on P-005, said openly. |
+| 414 frames looked like noise on walls and pipe runs | 129 boxes were touching parts of the same thing | Group them (49 objects) and orient 88 frames by PCA, display-only so labels stay valid. |
+| Every developer had to copy a 395 MB `.ply` by hand | — | Download from the team's Google Drive on first run, verified and resumable by re-run. |
 | Clicking a 3D label showed no vision data | The click handler captured the raw scene object | The handler is bound to the live object. |
 | `pandas` 3 rejected `agg("first")` | The server crashed during retrieval | Compute first/last/min/max/mean explicitly per series. |
 | Pointer Lock refused in the embedded browser | `SecurityError` | WASD/arrow walking works without pointer lock; mouse-look is optional. |

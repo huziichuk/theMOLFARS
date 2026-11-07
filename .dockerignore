@@ -1,0 +1,9 @@
+.git
+data/
+work/
+.venv*/
+__pycache__/
+web/boiler_room_clean.ply
+web/frames/
+web/_eval/
+.env

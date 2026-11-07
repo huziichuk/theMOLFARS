@@ -13,11 +13,12 @@ import re
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
@@ -25,7 +26,8 @@ from PIL import Image
 from sqlalchemy import create_engine, text
 
 sys.path.insert(0, str(Path(__file__).parent / "pipeline"))
-from build_scene import mapping_class  # noqa: E402
+from build_scene import URGENCY_ORDER, load_ply, mapping_class, priority, to_world, write_ply  # noqa: E402
+from export_usd import scene_to_usda  # noqa: E402
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
@@ -50,6 +52,8 @@ def make_engine():
         print(f"[db] PostgreSQL unavailable ({type(e).__name__}); using SQLite seeded from data/builder_pack.xlsx")
     import seed_db
 
+    if not seed_db.DEFAULT_XLSX.exists():
+        raise SystemExit(f"[db] no database and no {seed_db.DEFAULT_XLSX}: put the Excel pack there or start PostgreSQL")
     db = ROOT / "work" / "builder_pack.sqlite"
     if not db.exists() or db.stat().st_mtime < seed_db.DEFAULT_XLSX.stat().st_mtime:
         db.parent.mkdir(exist_ok=True)
@@ -66,6 +70,38 @@ def records(df, n=None):
     if n:
         df = df.tail(n)
     return json.loads(df.to_json(orient="records", date_format="iso"))
+
+
+def detect_anomalies(tel: pd.DataFrame, series: bool = False) -> dict:
+    """Builder question Q-02: emerging degradation from the multivariate 3-day telemetry, without using the pack's labels.
+    Per signal: the first 2 days are the baseline (median, MAD); z_level = last 6 h median vs baseline, z_trend =
+    change of a line through 6 h medians over the window; both in robust baseline units. The asset score is the RMS
+    of max(|z_level|, |z_trend|) over all signals (capped at 10). Separates non-healthy from healthy assets with
+    AUC 0.91 on the 30 assets of the pack (docs: HOW_IT_WORKS)."""
+    tel = tel.sort_values("timestamp")
+    num = tel.select_dtypes("number").dropna(axis=1, how="all")
+    n, out = len(tel), []
+    if n < 24:
+        return dict(score=0.0, signals=[])
+    nb = int(n * 2 / 3)
+    for c in num.columns:
+        s = num[c].astype(float).interpolate(limit_direction="both").to_numpy()
+        base = s[:nb]
+        med = float(np.median(base))
+        scale = max(1.4826 * float(np.median(np.abs(base - med))), 0.01 * abs(med), 1e-6)  # flat signal: 1 % of level
+        z_level = (float(np.median(s[-12:])) - med) / scale
+        blocks = np.array([np.median(s[i:i + 12]) for i in range(0, n, 12)])
+        z_trend = float(np.polyfit(np.arange(len(blocks)), blocks, 1)[0]) * (len(blocks) - 1) / scale
+        z = max(abs(z_level), abs(z_trend))
+        sig = dict(name=c, baseline=round(med, 3), recent=round(float(np.median(s[-12:])), 3),
+                   z_level=round(z_level, 2), z_trend=round(z_trend, 2), anomalous=bool(z >= 2))
+        if series:
+            sig["series"] = [round(float(v), 3) for v in s[::2]]  # 1 h steps for the sparkline
+            sig["baseline_end"] = nb // 2
+        out.append(sig)
+    zs = np.minimum([max(abs(x["z_level"]), abs(x["z_trend"])) for x in out], 10)
+    out.sort(key=lambda x: -max(abs(x["z_level"]), abs(x["z_trend"])))
+    return dict(score=round(float(np.sqrt(np.mean(np.square(zs)))), 2), signals=out)
 
 
 def asset_context(asset_id: str) -> dict:
@@ -137,6 +173,7 @@ def asset_context(asset_id: str) -> dict:
         docs=records(docs),
         data_quality=dq_records,
         confidence=trust(state_rec["model_confidence"], dq_records, scene_box(asset_id)),
+        anomalies=detect_anomalies(tel),  # our own Q-02 detector, independent of the pack's condition labels
     )
 
 
@@ -172,7 +209,7 @@ SYSTEM = """You are the Valmet field-service copilot inside a 3D digital twin of
 Answer ONLY from the CONTEXT (synthetic builder pack in PostgreSQL). If something is not in it, say so.
 Cite evidence IDs in square brackets: [ASSET-…], [EVT-…], [WO-…], [CASE-…], [DOC-…], [DQ-…].
 On arrival give a compact report with 4 headed sections:
-1. What is wrong — diagnosis, health score, model confidence, abnormal telemetry (first -> last).
+1. What is wrong — diagnosis, health score, model confidence, abnormal telemetry (first -> last) and what our telemetry detector (`anomalies`) sees.
 2. Why — linked alarms and maintenance history.
 3. What to do next — numbered, safe inspection steps (lockout/permit first) from cases and docs.
 4. Data trust — data-quality flags the technician must verify; give `confidence.overall` from the CONTEXT and say why it is lower than the model confidence.
@@ -209,6 +246,42 @@ def ask_gemini(client, ctx, history, question):
     return resp.text or "No response generated."
 
 
+def abnormal_signals(ctx, min_change=8):
+    """Telemetry signals that moved more than min_change % over the 3-day sample, biggest first: (name, trend, %)."""
+    out = []
+    for k, v in ctx["telemetry_trend_3d"].items():
+        if v.get("first"):
+            ch = (v["last"] - v["first"]) / abs(v["first"]) * 100
+            if abs(ch) > min_change:
+                out.append((k, v, ch))
+    return sorted(out, key=lambda t: -abs(t[2]))
+
+
+EVIDENCE_ID = re.compile(r"\b(?:ASSET|EVT|WO|CASE|DOC|DQ)-[A-Z0-9_]+(?:-[A-Z0-9_]+)*")
+
+
+def check_citations(answer: str, ctx: dict) -> dict:
+    """Hallucination guard: every evidence ID cited in [brackets] must exist in the retrieved context."""
+    known = set(EVIDENCE_ID.findall(json.dumps(ctx, default=str)))
+    cited = {i for group in re.findall(r"\[([^\[\]]+)\]", answer) for i in EVIDENCE_ID.findall(group)}
+    return dict(verified=sorted(cited & known), unknown=sorted(cited - known))
+
+
+def brief_line(ctx) -> str:
+    """One cited line for the copilot to say while the avatar walks past an asset."""
+    a, st = ctx["asset"], ctx["state"]
+    head = f"**{a['tag']}** [{a['asset_id']}] {st['condition_state'].replace('_', ' ')} · health {st['health_score']}"
+    if st["condition_state"] == "healthy":
+        return head + " — no significant deviation."
+    parts = [f"{head} — {st['issue_summary']} (`{st['issue_code']}`)"]
+    sig = abnormal_signals(ctx)[:1]
+    parts += [f"`{k}` {v['first']} -> {v['last']} ({ch:+.0f}%)" for k, v, ch in sig]
+    if ctx["alarms"]:
+        e = ctx["alarms"][-1]
+        parts.append(f"last alarm {e['event_code']} ({e['severity']}) [{e['event_id']}]")
+    return "; ".join(parts) + "."
+
+
 def offline_report(ctx, question):
     """Fallback without an LLM: the same evidence, templated. Every line carries its source ID."""
     a, st = ctx["asset"], ctx["state"]
@@ -219,11 +292,14 @@ def offline_report(ctx, question):
         f"- {st['issue_summary']} (`{st['issue_code']}`), condition {st['condition_state']}, "
         f"health {st['health_score']}/100, model confidence {st['model_confidence']}, urgency {st['urgency']}.",
     ]
-    for k, v in ctx["telemetry_trend_3d"].items():
-        if v.get("first") is not None and v["first"] != 0:
-            ch = (v["last"] - v["first"]) / abs(v["first"]) * 100
-            if abs(ch) > 8:
-                out.append(f"- `{k}`: {v['first']} -> {v['last']} ({ch:+.0f}%, range {v['min']}–{v['max']})")
+    for k, v, ch in abnormal_signals(ctx):
+        out.append(f"- `{k}`: {v['first']} -> {v['last']} ({ch:+.0f}%, range {v['min']}–{v['max']})")
+    an = ctx["anomalies"]
+    flagged = [x for x in an["signals"] if x["anomalous"]]
+    out.append(f"- Telemetry detector (last 6 h vs 2-day baseline): score {an['score']}"
+               + ("; " + ", ".join(f"`{x['name']}` level z {x['z_level']:+.1f}, trend z {x['z_trend']:+.1f}" for x in flagged[:3])
+                  if flagged else "; no signal beyond 2 robust units.")
+               + ("" if an["score"] >= 0.6 else " The Excel diagnosis is not yet visible in the raw telemetry."))
     out += ["", "**2. Why (evidence)**"]
     out += [
         f"- [{e['event_id']}] {e['event_type']} / {e['event_code']} ({e['severity']}) {e['timestamp'][:16]}"
@@ -281,6 +357,105 @@ def asset_rows(sql: str, asset_id: str, n: int | None = None):
         if pd.read_sql(text("SELECT 1 FROM asset_master WHERE asset_id = :aid"), conn, params={"aid": asset_id}).empty:
             return JSONResponse(status_code=404, content={"error": "unknown asset"})
         return records(pd.read_sql(text(sql), conn, params={"aid": asset_id}), n)
+
+
+_SPLAT = {}  # the clean splat, loaded once on the first isolate request
+
+
+@app.get("/api/objects/{object_id}/splat.ply")
+def object_splat(object_id: str):
+    """Item 5: only the splats inside one object's frame (+5 cm), so the viewer can show the object on its own."""
+    scene = json.loads((ROOT / "web" / "scene.json").read_text())
+    obj = next((o for o in scene["objects"] if o["id"] == object_id), None)  # also stops path tricks: IDs come from the scene
+    if not obj:
+        return JSONResponse(status_code=404, content={"error": "unknown object"})
+    out = ROOT / "work" / "isolate" / f"{scene['scene_id']}-{object_id}.ply"
+    if not out.exists():
+        if not _SPLAT:
+            header, _, rows = load_ply(ROOT / "web" / scene["splat"])
+            _SPLAT.update(header=header, rows=rows, w=to_world(rows[:, :3].astype(np.float64)))
+        g = next((g for g in scene.get("groups", []) if g["id"] == obj.get("group")), None)  # a multi-part object: all parts
+        lo_, hi_ = (np.array(g["bmin"]), np.array(g["bmax"])) if g else (np.array(obj["center"]) - np.array(obj["size"]) / 2,
+                                                                        np.array(obj["center"]) + np.array(obj["size"]) / 2)
+        c, half = (lo_ + hi_) / 2, (hi_ - lo_) / 2 + 0.05
+        inside = np.all(np.abs(_SPLAT["w"] - c) <= half, axis=1)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".tmp")
+        write_ply(tmp, _SPLAT["header"], _SPLAT["rows"][inside])
+        tmp.replace(out)
+    return FileResponse(out, media_type="application/octet-stream")
+
+
+@app.get("/api/scene/export.usda")
+def export_usda():
+    """Builder question Q-09: the semantic layer as OpenUSD text for Omniverse / Unity / Unreal / Blender."""
+    usda = scene_to_usda(json.loads((ROOT / "web" / "scene.json").read_text()))
+    return Response(usda, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="boiler_room.usda"'})
+
+
+@app.post("/api/telemetry")
+async def ingest_telemetry(request: Request):
+    """Builder question Q-07: a live source (MQTT, OPC UA, any API) appends readings to the same table the synthetic pack
+    filled, so the detector, the copilot and the viewer use them without any change. pipeline/mqtt_bridge.py is one
+    such source. Body: {asset_id, timestamp?, values: {signal: number}, source?}."""
+    try:
+        req = await read_json_body(request)
+        aid = str(req["asset_id"])
+        values = req["values"]
+        if not isinstance(values, dict) or not values:
+            raise TypeError
+        ts = pd.Timestamp(req.get("timestamp") or pd.Timestamp.now(tz="UTC"))
+        ts = (ts.tz_convert("UTC") if ts.tzinfo else ts).tz_localize(None)  # stored as naive UTC, like the pack
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "{asset_id, values: {signal: number}, timestamp?} required"})
+    with engine.begin() as conn:
+        master = pd.read_sql(text("SELECT tag, asset_class, area_id FROM asset_master WHERE asset_id = :aid"), conn, params={"aid": aid})
+        if master.empty:
+            return JSONResponse(status_code=404, content={"error": "unknown asset"})
+        cols = set(pd.read_sql(text("SELECT * FROM telemetry_sample_3d LIMIT 0"), conn).columns)
+        bad = [k for k, v in values.items() if k not in cols or isinstance(v, bool) or not isinstance(v, (int, float))]
+        if bad:  # only known numeric signals: column names come from the table, never from the request
+            return JSONResponse(status_code=400, content={"error": f"unknown or non-numeric signals: {bad[:5]}"})
+        row = {"timestamp": ts.to_pydatetime(), "asset_id": aid, **master.iloc[0].to_dict(),
+               "source_profile": str(req.get("source") or "live")[:40], "synthetic_record": False, **values}
+        names = list(row)
+        conn.execute(text(f"INSERT INTO telemetry_sample_3d ({', '.join(names)}) VALUES ({', '.join(':' + n for n in names)})"), row)
+    return {"stored": 1, "asset_id": aid, "timestamp": ts.isoformat()}
+
+
+@app.get("/api/priorities")
+def priorities():
+    """Builder question Q-04: every asset ranked by condition, criticality and uncertainty (same rule as the tour)."""
+    with engine.connect() as conn:
+        df = pd.read_sql(text("SELECT asset_id, tag, asset_class, criticality, health_score, condition_state, urgency, "
+                              "model_confidence, issue_code FROM current_state"), conn)
+    out = records(df)
+    for r in out:
+        r["priority"] = priority(r["health_score"], r["criticality"], r["model_confidence"])
+        r["why"] = (f"health {r['health_score']}, criticality {str(r['criticality'])[:1]}, "
+                    f"uncertainty {1 - float(r['model_confidence']):.2f}, urgency {r['urgency']}")
+    return sorted(out, key=lambda r: (URGENCY_ORDER.get(r["urgency"], 1), -r["priority"]))
+
+
+@app.get("/api/assets/{asset_id}/brief")
+def asset_brief(asset_id: str):
+    """What the copilot says while the avatar walks past this asset (deterministic, cited)."""
+    try:
+        ctx = asset_context(asset_id)
+    except KeyError:
+        return JSONResponse(status_code=404, content={"error": "unknown asset"})
+    line = brief_line(ctx)
+    return dict(asset_id=asset_id, condition_state=ctx["state"]["condition_state"], line=line, citations=check_citations(line, ctx))
+
+
+@app.get("/api/assets/{asset_id}/anomalies")
+def asset_anomalies(asset_id: str):
+    """Q-02 detector output with 1 h series for the sparklines in the viewer."""
+    with engine.connect() as conn:
+        tel = pd.read_sql(text("SELECT * FROM telemetry_sample_3d WHERE asset_id = :aid ORDER BY timestamp"), conn, params={"aid": asset_id})
+    if tel.empty:
+        return JSONResponse(status_code=404, content={"error": "unknown asset or no telemetry"})
+    return detect_anomalies(tel, series=True)
 
 
 @app.get("/api/assets/{asset_id}/telemetry")
@@ -686,10 +861,12 @@ async def copilot(request: Request):
         client = gemini_client()
         if client:
             try:
-                return {"mode": MODEL, "answer": await asyncio.to_thread(ask_gemini, client, ctx, history, question)}
+                answer = await asyncio.to_thread(ask_gemini, client, ctx, history, question)
+                return {"mode": MODEL, "answer": answer, "citations": check_citations(answer, ctx)}
             except Exception as e:
                 print("[copilot] LLM unavailable:", type(e).__name__, e)
-        return {"mode": "offline-evidence", "answer": offline_report(ctx, question)}
+        answer = offline_report(ctx, question)
+        return {"mode": "offline-evidence", "answer": answer, "citations": check_citations(answer, ctx)}
 
     if req.get("object_id"):
         try:
@@ -742,7 +919,27 @@ async def no_cache_html_json(request: Request, call_next):
 app.mount("/", StaticFiles(directory=str(ROOT / "web"), html=True), name="web")
 
 
+def ensure_scene():
+    """First start of a fresh clone: the clean splat is generated, not in git. Download the scan from Google Drive
+    and run the pipeline once (needs data/builder_pack.xlsx); afterwards this is a no-op."""
+    scene = json.loads((ROOT / "web" / "scene.json").read_text())
+    if (ROOT / "web" / scene["splat"]).exists():
+        return
+    import subprocess
+
+    from fetch_data import DEFAULT_PLY, fetch_ply
+
+    xlsx = ROOT / "data" / "builder_pack.xlsx"
+    if not xlsx.exists():
+        print(f"[setup] web/{scene['splat']} is missing and so is {xlsx}: put the Excel pack there and restart.")
+        return
+    fetch_ply(DEFAULT_PLY)
+    print("[setup] building the scene once (~1 min) ...", flush=True)
+    subprocess.run([sys.executable, str(ROOT / "pipeline" / "build_scene.py"), str(DEFAULT_PLY), str(xlsx), str(ROOT / "web")], check=True)
+
+
 if __name__ == "__main__":
+    ensure_scene()
     port = int(os.environ.get("PORT", 8000))
     print(f"Valmet FastAPI demo on http://localhost:{port}")
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=port)  # the container sets HOST=0.0.0.0

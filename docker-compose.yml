@@ -17,5 +17,23 @@ services:
       timeout: 5s
       retries: 10
 
+  app:  # the demo: docker compose up  ->  http://localhost:8000
+    build: .
+    container_name: molfars-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-molfars}:${POSTGRES_PASSWORD:-molfars}@postgres:5432/${POSTGRES_DB:-molfars}
+    env_file:
+      - path: .env  # GEMINI_API_KEY, optional
+        required: false
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data  # builder_pack.xlsx (+ the splat, downloaded on first start)
+      - ./web:/app/web    # generated scene, labels written by the vision endpoints
+      - ./work:/app/work
+
 volumes:
   pgdata:

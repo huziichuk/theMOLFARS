@@ -17,6 +17,10 @@
 | Photo matching | CLIP tile embeddings + CSLS hubness-corrected nearest neighbour; Cache API | | browser |
 | Gemini vision | `gemini-3.5-flash-lite` multimodal: batch contact sheets (`gemini_vision.py`), one object and current view (`/api/vision/gemini*`); JSON output constrained to the `vocab.json` classes | needs `GEMINI_API_KEY` | `pipeline/gemini_vision.py`, `server.py` |
 | Label refinement | `refine_vision`: render/photo fusion + geometry and room-specific rules; `asset_fit_score` for the Excel mapping | | `build_scene.py` |
+| Telemetry detector | Robust level + trend z-scores (median/MAD baseline), RMS over signals; NumPy | AUC 0.91 on the pack | `server.py` (`detect_anomalies`) |
+| Planning | Q-04 priority, urgency tiers + greedy nearest stop by A* length | | `build_scene.py` (`priority`, `plan_tour`) |
+| Interop | OpenUSD text export (no USD library); MQTT bridge (`paho-mqtt`, optional) | Omniverse / Unity / Unreal / Blender | `pipeline/export_usd.py`, `pipeline/mqtt_bridge.py` |
+| Packaging | Dockerfile (Python 3.12) + Docker Compose, GitHub Actions CI, Google Drive download (stdlib `urllib`) | | `Dockerfile`, `.github/workflows/tests.yml`, `pipeline/fetch_data.py` |
 | Data store | PostgreSQL 16 (Docker Compose), seeded from the Excel pack by `seed_db.py` (14 tables, indexed); SQLite fallback seeded the same way when PostgreSQL is not reachable | `postgres:16-alpine` | `docker-compose.yml`, `seed_db.py`, `server.py` |
 | Copilot retrieval | Deterministic relational retrieval, parameterised SQL via SQLAlchemy + psycopg 3, pandas | | `server.py` |
 | LLM | Google Gemini `gemini-3.5-flash-lite` via the `google-genai` SDK; offline evidence template without a key or on API errors | | `server.py` |

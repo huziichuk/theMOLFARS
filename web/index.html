@@ -13,6 +13,7 @@
   #hud button, #hud label { background:#000a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; cursor:pointer; font:inherit; }
   #hud button[aria-pressed="true"] { border-color:var(--acc); color:var(--acc); }
   #status { position:absolute; bottom:12px; left:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); z-index:10; }
+  #caption { position:absolute; left:50%; bottom:70px; transform:translateX(-50%); max-width:80%; background:#000c; color:#fff; padding:10px 16px; border-radius:8px; font-size:18px; text-align:center; z-index:12; display:none; }
   #help { position:absolute; bottom:12px; right:12px; background:#000a; padding:6px 10px; border-radius:6px; color:var(--mute); font-size:12px; z-index:10; }
   aside { width:400px; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }
   aside h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:14px 14px 6px; }
@@ -26,6 +27,8 @@
   .msg.user { background:#4ea1ff1f; align-self:flex-end; max-width:85%; }
   .msg code { background:#ffffff14; padding:0 3px; border-radius:3px; }
   .msg .cite { color:var(--acc); }
+  .msg .cite.unverified { color:var(--bad); text-decoration:line-through wavy; }
+  .msg .cites { color:var(--mute); font-size:11px; margin-top:4px; }
   form { display:flex; gap:6px; padding:12px 14px; border-top:1px solid var(--line); }
   form input { flex:1; background:#0f1115; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
   form button { background:var(--acc); color:#000; border:0; border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
@@ -60,10 +63,13 @@
 <div id="view">
   <div id="hud">
     <button id="play">▶ Start mission</button>
+    <button id="tour" title="Visit every non-healthy asset: urgent first, shortest walk within each urgency level (Q-04)">🧭 Inspection tour</button>
     <button data-mode="follow" aria-pressed="true">Follow</button>
     <button data-mode="orbit">Orbit</button>
     <button data-mode="walk">Walk (WASD)</button>
     <button id="all" aria-pressed="false">All frames</button>
+    <button id="demo" title="Scripted 6-step walkthrough with captions, for recording the demo video">🎬 Demo</button>
+    <a href="api/scene/export.usda" download style="background:#000a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 10px;text-decoration:none" title="The semantic layer as OpenUSD for Omniverse, Unity, Unreal, Blender (Q-09)">⬇ OpenUSD</a>
     <button id="bim-btn" aria-pressed="true">🗺️ BIM plan</button>
     <button id="ai">AI labels (CLIP)</button>
     <button id="gemini-hud" style="border-color:var(--acc);color:var(--acc)">✨ Gemini scan view</button>
@@ -81,6 +87,7 @@
     </div>
   </div>
   <div id="status">Loading…</div>
+  <div id="caption" role="status" aria-live="polite"></div>
   <div id="help">Walk: WASD / arrows (click view for mouse-look, Esc to release) · Orbit: drag / wheel</div>
   <div id="loading">Loading splat scene…</div>
 </div>
@@ -160,10 +167,12 @@ const COLORS = { healthy: 0x3ecf6e, warn: 0xf2b636, bad: 0xff4d4d, info: 0x4ea1f
 
 function makeObj(o, color) {
   const cls = stateClass(o);
+  const b = o.obb ?? { size: o.size, center: o.center, yaw: 0 }; // yaw-oriented frame from the pipeline's PCA, if tighter
   const box = new THREE.LineSegments(
-    new THREE.EdgesGeometry(new THREE.BoxGeometry(...o.size)),
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(...b.size)),
     new THREE.LineBasicMaterial({ color: color ?? COLORS[cls], transparent: true, opacity: 0.95 }));
-  box.position.set(...o.center);
+  box.position.set(...b.center);
+  box.rotation.y = -b.yaw;
   const el = document.createElement("div");
   el.className = `label3d ${cls}`;
   el.textContent = o.asset ? `${o.asset.tag} · ${o.label}` : o.label;
@@ -176,10 +185,23 @@ function makeObj(o, color) {
 }
 const objs = S.objects.map((o) => makeObj(o));
 const target = objs.find((o) => o.id === S.target_object);
+// item 6: a pipe run or shelf split into parts gets one frame: the biggest part draws the group's bounds, the rest hide
+const byId = new Map(objs.map((o) => [o.id, o]));
+for (const g of S.groups ?? []) {
+  const parts = g.members.map((id) => byId.get(id));
+  const vol = (o) => o.size[0] * o.size[1] * o.size[2];
+  const lead = parts.reduce((a, b) => (vol(a) >= vol(b) ? a : b));
+  const size = g.bmax.map((v, k) => v - g.bmin[k]), center = g.bmax.map((v, k) => (v + g.bmin[k]) / 2);
+  lead.box.geometry.dispose(); lead.box.geometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(...size));
+  lead.box.position.set(...center); lead.box.rotation.set(0, 0, 0);
+  lead.lab.position.set(0, size[1] / 2 + 0.05, 0);
+  lead.parts = parts.length; lead.isoBounds = { center, size };
+  for (const p of parts) if (p !== lead) p.isFragment = true;
+}
 window.demo = { objs }; // console access for inspecting vision results (o.ai, o.thumb)
 
 // path + avatar + proximity ring
-const pts = S.path.map((p) => new THREE.Vector3(p[0], floorY + 0.02, p[2]));
+let pts = S.path.map((p) => new THREE.Vector3(p[0], floorY + 0.02, p[2]));
 const route = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
   new THREE.LineDashedMaterial({ color: 0xffd400, dashSize: 0.08, gapSize: 0.05 }));
 route.computeLineDistances();
@@ -235,25 +257,89 @@ addEventListener("keyup", (e) => {
 
 // ---------- mission playback
 let playing = false, seg = 0, arrived = false;
+let tour = null; // Q-04 inspection tour: { stops, at: Map(path index -> stop), ids: Set(asset ids), done }
+function useRoute(path) { // switch the avatar between the mission route and the tour route
+  pts = path.map((p) => new THREE.Vector3(p[0], floorY + 0.02, p[2]));
+  route.geometry.dispose(); route.geometry = new THREE.BufferGeometry().setFromPoints(pts); route.computeLineDistances();
+  seg = 0; arrived = false; narrated.clear(); avatar.position.copy(pts[0]).setY(floorY);
+}
 $("#play").onclick = () => {
-  if (arrived) { seg = 0; arrived = false; avatar.position.copy(pts[0]).setY(floorY); }
+  if (arrived) { tour = null; $("#tour").setAttribute("aria-pressed", false); useRoute(S.path); } // replay = the mission
   playing = !playing; setMode("follow");
   $("#play").textContent = playing ? "⏸ Pause" : "▶ Resume";
   wake(1500);
+};
+$("#tour").onclick = () => {
+  const T = S.tour;
+  if (!T?.stops.length) return say("bot", "No inspection tour in this scene (rebuild with build_scene.py).");
+  tour = { stops: T.stops, at: new Map(T.stops.map((st) => [st.path_index, st])), ids: new Set(T.stops.map((st) => st.asset_id)), done: 0 };
+  useRoute(T.path); playing = true; setMode("follow");
+  $("#tour").setAttribute("aria-pressed", true); $("#play").textContent = "⏸ Pause";
+  say("bot", `🧭 **Inspection tour: ${T.stops.length} non-healthy assets, ${T.length_m} m** — urgent first, then the shortest walk.\n`
+    + `Priority = (1 − health) × criticality (A 1.0, B 0.75, C 0.5) × (1 + uncertainty), the Q-04 rule.\n`
+    + T.stops.map((st, i) => `${i + 1}. ${st.tag} [${st.asset_id}] ${st.urgency}, priority ${st.priority}`).join("\n")
+    + (T.skipped.length ? `\nNot reachable from the floor: ${T.skipped.join(", ")}` : ""));
+  wake(1500);
+};
+async function onStop(st) {
+  tour.done++;
+  const u = (1 - st.model_confidence).toFixed(2);
+  say("bot", `🧭 **Stop ${tour.done}/${tour.stops.length}: ${st.tag}** — priority ${st.priority} `
+    + `(${st.condition_state.replace("_", " ")}, health ${st.health_score}, criticality ${st.criticality[0]}, uncertainty ${u}, urgency ${st.urgency})`);
+  const r = await fetch(`api/assets/${st.asset_id}/brief`).then((r) => r.json()).catch(() => null);
+  if (r?.line) markCites(say("bot", r.line), r.citations);
+}
+// item 9: the whole story in one take (≈ 2 min): overview, floor plan, mission, diagnosis, isolation, tour
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function caption(t) { $("#caption").textContent = t; $("#caption").style.display = t ? "block" : "none"; }
+let demoRunning = false;
+$("#demo").onclick = async () => {
+  if (demoRunning) return;
+  demoRunning = true;
+  try {
+    if (iso) unisolate();
+    caption(`1/6 · ${S.objects.length} objects framed in the raw Gaussian-splat scan, named by vision`);
+    setMode("orbit"); if (!showAll) $("#all").click();
+    await sleep(7000);
+    $("#all").click();
+    caption("2/6 · Walkable floor, obstacles and the A* route, all measured from the splat");
+    if (!bimLarge) $("#bim-size").click();
+    await sleep(6000);
+    $("#bim-size").click();
+    caption("3/6 · The avatar walks; frames and Excel status appear within 1.3 m and the copilot comments");
+    tour = null; $("#tour").setAttribute("aria-pressed", false); useRoute(S.path);
+    playing = true; setMode("follow"); $("#play").textContent = "⏸ Pause";
+    for (let t = 0; !arrived && t < 600; t++) await sleep(300); // ≤ 3 min, also if the tab is in the background
+    caption(`4/6 · At ${target.asset.tag}: a cited diagnosis; every evidence ID is checked against the data`);
+    await sleep(10000);
+    caption("5/6 · The faulty pump on its own: only the splats inside its frame");
+    isolate(target);
+    await sleep(7000);
+    unisolate();
+    caption("6/6 · Inspection tour (Q-04): every non-healthy asset, urgent first, shortest walk");
+    $("#tour").click();
+    await sleep(15000);
+  } finally {
+    caption(""); demoRunning = false;
+  }
 };
 let showAll = false;
 $("#all").onclick = (e) => { showAll = !showAll; e.target.setAttribute("aria-pressed", showAll); proximity(); wake(800); };
 
 function stepMission(dt) {
   if (!playing || arrived) return;
-  let move = SPEED * dt;
+  let move = (tour ? 2 * SPEED : SPEED) * dt; // the tour is ~57 m: walk it at double speed
   while (move > 0 && seg < pts.length - 1) {
     const to = pts[seg + 1].clone().setY(floorY);
     const d = to.distanceTo(avatar.position);
-    if (d <= move) { avatar.position.copy(to); seg++; move -= d; }
+    if (d <= move) { avatar.position.copy(to); seg++; move -= d; if (tour?.at.has(seg)) onStop(tour.at.get(seg)); }
     else { avatar.position.lerp(to, move / d); avatar.lookAt(to.x, floorY, to.z); move = 0; }
   }
-  if (seg >= pts.length - 1) { arrived = true; playing = false; $("#play").textContent = "↺ Replay"; onArrive(); }
+  if (seg >= pts.length - 1) {
+    arrived = true; playing = false; $("#play").textContent = "↺ Replay";
+    if (tour) say("bot", `🧭 **Tour complete:** ${tour.done} assets inspected. Select any of them for a full cited diagnosis or a work-order draft.`);
+    else onArrive();
+  }
 }
 
 function stepWalk(dt) {
@@ -317,7 +403,31 @@ const isNoise = (o) => {
   return false;
 };
 
+// item 5: show one object on its own (its splats cut out by the server), orbit around it; Esc or the button again exits
+let iso = null;
+function isolate(o) {
+  if (iso) return unisolate();
+  const mesh = new SplatMesh({ url: `api/objects/${o.id}/splat.ply` });
+  mesh.rotation.x = Math.PI;
+  scene.add(mesh);
+  iso = { o, mesh, mode };
+  splat.visible = route.visible = avatar.visible = false;
+  setMode("orbit");
+  const { center: c, size } = o.isoBounds ?? (o.obb ?? o);
+  const d = Math.max(0.8, Math.max(...size) * 2.2);
+  orbit.target.set(...c); camera.position.set(c[0] + d * 0.7, c[1] + d * 0.45, c[2] + d * 0.7);
+  status(`Isolated ${o.asset?.tag ?? o.id} — drag to orbit, Esc to return`);
+  wake(2500);
+}
+function unisolate() {
+  scene.remove(iso.mesh); iso.mesh.dispose?.();
+  splat.visible = route.visible = avatar.visible = true;
+  setMode(iso.mode); iso = null; lastNear = ""; lastPx = NaN; proximity(); status("Back in the room"); wake(1200);
+}
+addEventListener("keydown", (e) => { if (e.code === "Escape" && iso) unisolate(); });
+
 function proximity() {
+  if (iso) { for (const o of objs) o.box.visible = o === iso.o; return; }
   const p = avatar.position;
   const selId = selected?.id ?? "";
   if (lastNear !== "" && showAll === lastShowAll && selId === lastSelId && Math.hypot(p.x - lastPx, p.z - lastPz) < 0.02) return;
@@ -332,6 +442,7 @@ function proximity() {
     else if (!on && activeBoxes.has(o)) { scene.remove(o.box); activeBoxes.delete(o); }
     if (!hide && d < RADIUS) near.push([d, o]);
   }
+  if (playing) for (const [, o] of near) if (o.asset && o !== target && !narrated.has(o.id) && !tour?.ids.has(o.asset.asset_id)) narrate(o);
   // Excel-mapped assets first, then by distance; only attach CSS2DObject to the few visible labels for high FPS
   near.sort((a, b) => (!a[1].asset - !b[1].asset) || a[0] - b[0]);
   const wantLabs = new Set([target, ...(selected && !isNoise(selected) ? [selected] : []), ...near.slice(0, MAX_LABELS).map(([, o]) => o)]);
@@ -362,6 +473,30 @@ function say(role, text) {
   $("#chat").append(div); $("#chat").scrollTop = 1e9;
   return div;
 }
+// item 3: mark every cited evidence ID the server could not find in the retrieved context
+const EVIDENCE_ID = /(?:ASSET|EVT|WO|CASE|DOC|DQ)-[A-Z0-9_]+(?:-[A-Z0-9_]+)*/g;
+function markCites(div, c) {
+  if (!c) return div;
+  const bad = new Set(c.unknown);
+  div.querySelectorAll(".cite").forEach((el) => {
+    const miss = [...el.textContent.matchAll(EVIDENCE_ID)].some((m) => bad.has(m[0]));
+    el.classList.toggle("unverified", miss);
+    el.title = miss ? "Not found in the retrieved evidence" : "Found in the retrieved evidence";
+  });
+  return div;
+}
+const citeSummary = (c) => !c ? "" : c.unknown.length
+  ? `⚠ ${c.unknown.length} cited ID(s) not in the evidence: ${c.unknown.join(", ")} · ${c.verified.length} verified`
+  : `✓ ${c.verified.length} cited ID(s) verified against the evidence`;
+
+// item 2: the copilot comments on each Excel asset the avatar passes (one cited line, deterministic)
+const narrated = new Set();
+async function narrate(o) {
+  narrated.add(o.id);
+  const r = await fetch(`api/assets/${o.asset.asset_id}/brief`).then((r) => r.json()).catch(() => null);
+  if (r?.line) markCites(say("bot", `${r.condition_state === "healthy" ? "🟢" : "🟠"} ${r.line}`), r.citations);
+}
+
 async function copilot(question) {
   if (!selected) return;
   const h = history;
@@ -372,7 +507,8 @@ async function copilot(question) {
   const r = await fetch("api/copilot", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload) })
     .then((r) => r.json()).catch((e) => ({ error: `Copilot unavailable: ${e.message}` }));
-  wait.innerHTML = md(r.answer ?? r.error) + `<div style="color:var(--mute);font-size:11px;margin-top:4px">source: ${r.mode ?? "error"}</div>`;
+  wait.innerHTML = md(r.answer ?? r.error) + `<div class="cites">source: ${esc(r.mode ?? "error")}${r.citations ? " · " + citeSummary(r.citations) : ""}</div>`;
+  markCites(wait, r.citations);
   if (r.answer) h.push({ role: "user", content: payload.question ?? "ARRIVED: run full diagnosis." }, { role: "assistant", content: r.answer });
 }
 async function geminiClassify(o, btn) {
@@ -481,6 +617,24 @@ async function geminiScanScene(btn) {
     if (btn) { btn.disabled = false; btn.textContent = "✨ Gemini scan view"; }
   }
 }
+// item 4 (Q-02): 3-day telemetry sparklines; grey band = 2-day baseline, red tail = last 6 h when the detector flags it
+function sparkHTML(an) {
+  const W = 150, H = 30;
+  const rows = an.signals.slice(0, 4).map((sg) => {
+    const v = sg.series, lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1;
+    const xy = v.map((y, i) => `${(i / (v.length - 1) * W).toFixed(1)},${(H - 2 - (y - lo) / span * (H - 4)).toFixed(1)}`);
+    const tail = xy.slice(-6).join(" ");
+    const bx = sg.baseline_end / (v.length - 1) * W;
+    return `<div style="display:flex;align-items:center;gap:6px;font-size:11px;margin-top:2px">
+      <svg width="${W}" height="${H}" role="img" aria-label="${esc(sg.name)} over 3 days">
+        <rect x="0" y="0" width="${bx.toFixed(1)}" height="${H}" fill="rgba(140,150,165,.15)"/>
+        <polyline points="${xy.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="1.2"/>
+        ${sg.anomalous ? `<polyline points="${tail}" fill="none" stroke="var(--bad)" stroke-width="2"/>` : ""}
+      </svg>
+      <span><code>${esc(sg.name)}</code> ${sg.baseline} → ${sg.recent} · z ${sg.z_level > 0 ? "+" : ""}${sg.z_level}${sg.anomalous ? " ⚠" : ""}</span></div>`;
+  }).join("");
+  return `<div style="margin-top:6px"><b>Telemetry detector</b> (Q-02) · score ${an.score}${rows}</div>`;
+}
 function select(o) {
   if (!o) return;
   selected = o; history = [];
@@ -501,8 +655,12 @@ function select(o) {
       <button type="button" class="gvis" style="font-size:11px;padding:4px 8px;cursor:pointer">✨ Gemini Vision (object)</button>
       <button type="button" class="ginspect" style="font-size:11px;padding:4px 8px;cursor:pointer">🔍 Inspect (copilot)</button>
       ${o.asset ? `<button type="button" class="gdraft" style="font-size:11px;padding:4px 8px;cursor:pointer">📝 Work-order draft</button>` : ""}
+      <button type="button" class="giso" style="font-size:11px;padding:4px 8px;cursor:pointer">🔎 Isolate</button>
     </div>`);
   if (o.asset) msg.querySelector(".gdraft").onclick = () => draftWorkOrder(o.asset);
+  msg.querySelector(".giso").onclick = () => isolate(o);
+  if (o.asset) fetch(`api/assets/${o.asset.asset_id}/anomalies`).then((r) => r.json())
+    .then((an) => an.signals && msg.insertAdjacentHTML("beforeend", sparkHTML(an))).catch(() => {});
   msg.querySelector(".gvis").onclick = (e) => geminiClassify(o, e.currentTarget);
   msg.querySelector(".ginspect").onclick = () => copilot(o.asset ? `Run a full diagnosis of ${o.asset.tag}.` : `Inspect object ${o.id} (${nameOf(o)}) in the boiler room.`);
   proximity();
@@ -669,7 +827,8 @@ function applyAI(o, r) {
   if (!r) return;
   o.ai = r;
   if (r.reason) o.reason = r.reason;
-  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (sure(o) ? `${r.label} ${Math.round(r.score * 100)}%` : UNKNOWN);
+  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (sure(o) ? `${r.label} ${Math.round(r.score * 100)}%` : UNKNOWN)
+    + (o.parts ? ` · ${o.parts} parts` : "");
   o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}%${r.reason ? ` — ${r.reason}` : ""}`;
   if (!o.asset && sure(o)) {
     if (r.kind === "clutter") {
@@ -968,7 +1127,8 @@ renderer.setAnimationLoop(() => {
   if (orbit.enabled) orbit.update();
   if (!playing && performance.now() > wakeUntil) return;
   target.box.material.opacity = 0.55 + 0.45 * Math.sin(performance.now() / 200);
-  if (playing) status(`En route to ${target.asset.tag} · ${avatar.position.distanceTo(pts.at(-1)).toFixed(1)} m left`);
+  if (playing) status(tour ? `Inspection tour · stop ${tour.done}/${tour.stops.length}`
+    : `En route to ${target.asset.tag} · ${avatar.position.distanceTo(pts.at(-1)).toFixed(1)} m left`);
   renderer.render(scene, camera); labels.render(scene, camera);
 });
 </script>
