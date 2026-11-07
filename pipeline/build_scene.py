@@ -65,6 +65,29 @@ def write_ply(path, header, rows):
     Path(path).write_bytes(("\n".join(lines) + "\n").encode() + rows.astype("<f4").tobytes())
 
 
+def write_spz(path, rows, P, frac_bits=12):
+    """The same splats as Niantic .spz v2 (quantized + gzip): ~4x smaller than the float PLY, loads natively in Spark.
+    Positions 24-bit fixed point, alpha / DC colour / log-scale as bytes, rotation as the xyz of a w>=0 quaternion."""
+    import gzip
+    import struct
+
+    n = len(rows)
+    col = lambda *names: rows[:, [P[k] for k in names]].astype(np.float64)  # noqa: E731
+    xyz = np.ascontiguousarray(np.round(col("x", "y", "z") * (1 << frac_bits)).astype("<i4"))
+    pos = xyz.view(np.uint8).reshape(n, 3, 4)[:, :, :3]  # low 3 bytes of little-endian int32 = 24-bit two's complement
+    to_u8 = lambda v: np.clip(np.round(v), 0, 255).astype(np.uint8)  # noqa: E731
+    alpha = to_u8(255 / (1 + np.exp(-col("opacity")[:, 0])))
+    color = to_u8(col("f_dc_0", "f_dc_1", "f_dc_2") * (0.15 * 255) + 127.5)
+    scale = to_u8((col("scale_0", "scale_1", "scale_2") + 10) * 16)
+    q = col("rot_0", "rot_1", "rot_2", "rot_3")  # w, x, y, z
+    q /= np.linalg.norm(q, axis=1, keepdims=True) + 1e-12
+    q *= np.where(q[:, :1] < 0, -1, 1)
+    rot = to_u8(q[:, 1:] * 127.5 + 127.5)
+    head = struct.pack("<IIIBBBB", 0x5053474E, 2, n, 0, frac_bits, 0, 0)  # magic "NGSP", version 2, SH degree 0
+    body = b"".join(a.tobytes() for a in (pos, alpha, color, scale, rot))
+    Path(path).write_bytes(gzip.compress(head + body, 6))
+
+
 # ---------------------------------------------------------------- 2. frame + floor
 def to_world(xyz):
     # COLMAP-style capture is y-down; rotate 180deg about X (same as mesh.rotation.x = PI in three.js)
@@ -687,7 +710,8 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     clean_idx = np.flatnonzero(((max_sc > 0.03) & (opacity >= 0.08)) | (opacity >= 0.20))
     keep_cols = [i for i, p in enumerate(props) if not p.startswith("f_rest_")]
     slim_header = "\n".join(l for l in header.splitlines() if not (l.startswith("property") and l.split()[-1].startswith("f_rest_"))) + "\n"
-    write_ply(out / "boiler_room_clean.ply", slim_header, rows[clean_idx][:, keep_cols])
+    write_ply(out / "boiler_room_clean.ply", slim_header, rows[clean_idx][:, keep_cols])  # kept for isolate / downloads
+    write_spz(out / "boiler_room_clean.spz", rows[clean_idx][:, keep_cols], {props[i]: k for k, i in enumerate(keep_cols)})  # what the viewer loads
     print(f"[splat] wrote {len(clean_idx):,}/{len(rows):,} surface splats ({len(keep_cols)} props)")
 
     g = build_grid(w, opacity, floor)
@@ -767,7 +791,7 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
         return v
 
     scene = dict(
-        splat="boiler_room_clean.ply", frame="rotate_x_180",
+        splat="boiler_room_clean.spz", frame="rotate_x_180",
         floor_y=floor, ceiling_y=ceil,
         grid=dict(origin=[float(x) for x in g["origin"]], cell=CELL, w=g["W"], h=g["H"],
                   walkable="".join("1" if v else "0" for v in g["walk"].T.ravel())),  # row-major by z

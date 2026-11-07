@@ -4,6 +4,7 @@ work/
 .venv*/
 __pycache__/
 web/boiler_room_clean.ply
+web/boiler_room_clean.spz
 web/frames/
 web/_eval/
 .env

@@ -99,6 +99,74 @@ class UsdExport(unittest.TestCase):
             self.assertEqual(target.GetAttribute("valmet:tag").Get(), "P-005")
 
 
+class BimExport(unittest.TestCase):
+    """Scan-to-BIM: IFC4 with one element per frame and the Excel record; with ifcopenshell installed (CI) the file is
+    schema-validated and the target pump's geometry is checked; the SVG plan is well-formed XML."""
+
+    def test_ifc_and_plan(self):
+        import re
+        import xml.dom.minidom
+
+        import export_bim
+
+        scene = SAVED["scene"]
+        ifc = export_bim.scene_to_ifc(scene)
+        self.assertIn("FILE_SCHEMA(('IFC4'));", ifc)
+        data = ifc.split("DATA;")[1]
+        ids = set(re.findall(r"^#(\d+)=", data, re.M))
+        self.assertEqual(set(re.findall(r"#(\d+)", data)) - ids, set())  # no dangling references
+        self.assertEqual(len(re.findall(r"Pset_Semantic3D", data)), len(scene["objects"]))
+        xml.dom.minidom.parseString(export_bim.scene_to_plan_svg(scene).encode())
+        try:
+            import ifcopenshell
+            import ifcopenshell.util.element as E
+            import ifcopenshell.validate
+        except ImportError:
+            return
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.ifc"
+            f.write_text(ifc, encoding="ascii")
+            model = ifcopenshell.open(str(f))
+            log = ifcopenshell.validate.json_logger()
+            ifcopenshell.validate.validate(model, log)
+            self.assertEqual(log.statements, [])
+            target = [e for e in model.by_type("IfcElement") if E.get_pset(e, "Pset_ValmetAsset", prop="IsMissionTarget")]
+            self.assertEqual([t.is_a() for t in target], ["IfcPump"])
+            self.assertEqual(E.get_pset(target[0], "Pset_ValmetAsset", prop="Tag"), "P-005")
+
+
+class SpzWriter(unittest.TestCase):
+    """The .spz the viewer loads decodes back to the PLY values within its quantisation steps."""
+
+    def test_round_trip(self):
+        import gzip
+        import struct
+        import tempfile
+
+        names = ["x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_1", "rot_2", "rot_3", "rot_0", "f_dc_0", "f_dc_1", "f_dc_2", "opacity"]
+        Pz = {k: i for i, k in enumerate(names)}
+        rows = np.array([[1.25, -0.5, 3.0, -3.0, -4.0, -5.0, 0.0, 0.0, 0.0, -1.0, 0.4, -0.2, 0.0, 2.0],
+                         [-2.0, 0.001, -0.75, -2.0, -2.0, -2.0, 0.6, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, -1.0]], np.float32)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "t.spz"
+            B.write_spz(f, rows, Pz)
+            raw = gzip.decompress(f.read_bytes())
+        magic, version, n, sh, frac, _, _ = struct.unpack("<IIIBBBB", raw[:16])
+        self.assertEqual((magic, version, n, sh, frac), (0x5053474E, 2, 2, 0, 12))
+        body = np.frombuffer(raw[16:], np.uint8)
+        pos = body[:n * 9].reshape(n, 3, 3).astype(np.int32)
+        val = pos[..., 0] | (pos[..., 1] << 8) | (pos[..., 2] << 16)
+        val = np.where(val >= 1 << 23, val - (1 << 24), val) / 4096.0
+        np.testing.assert_allclose(val, rows[:, :3], atol=1 / 4096)
+        alpha = body[n * 9:n * 10]
+        np.testing.assert_allclose(alpha / 255, 1 / (1 + np.exp(-rows[:, 13])), atol=1 / 255)
+        rot = body[n * 16:n * 19].reshape(n, 3) / 127.5 - 1  # after pos 9, alpha 1, colour 3, scale 3 bytes per splat
+        np.testing.assert_allclose(rot[1], [0.6, 0, 0], atol=0.01)  # w >= 0 kept as is
+        np.testing.assert_allclose(rot[0], [0, 0, 0], atol=0.01)    # w = -1 flipped to +1, xyz stay 0
+
+
 class Frames(unittest.TestCase):
     """Item 6: oriented frames for rotated objects and one group for touching parts of the same thing."""
 

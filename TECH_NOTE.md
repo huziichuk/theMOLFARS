@@ -20,6 +20,8 @@
 | Telemetry detector | Robust level + trend z-scores (median/MAD baseline), RMS over signals; NumPy | AUC 0.91 on the pack | `server.py` (`detect_anomalies`) |
 | Planning | Q-04 priority, urgency tiers + greedy nearest stop by A* length | | `build_scene.py` (`priority`, `plan_tour`) |
 | Interop | OpenUSD text export (no USD library); MQTT bridge (`paho-mqtt`, optional) | Omniverse / Unity / Unreal / Blender | `pipeline/export_usd.py`, `pipeline/mqtt_bridge.py` |
+| Scan-to-BIM | IFC4 STEP writer (no IFC library) + SVG plan / section; validated with ifcopenshell | Revit, Bonsai, Solibri, xeokit | `pipeline/export_bim.py` |
+| Splat format | Niantic `.spz` v2 writer (NumPy + gzip) for the viewer; float PLY kept for crops | Spark loads `.spz` natively | `build_scene.py` (`write_spz`) |
 | Packaging | Dockerfile (Python 3.12) + Docker Compose, GitHub Actions CI, Google Drive download (stdlib `urllib`) | | `Dockerfile`, `.github/workflows/tests.yml`, `pipeline/fetch_data.py` |
 | Data store | PostgreSQL 16 (Docker Compose), seeded from the Excel pack by `seed_db.py` (14 tables, indexed); SQLite fallback seeded the same way when PostgreSQL is not reachable | `postgres:16-alpine` | `docker-compose.yml`, `seed_db.py`, `server.py` |
 | Copilot retrieval | Deterministic relational retrieval, parameterised SQL via SQLAlchemy + psycopg 3, pandas | | `server.py` |

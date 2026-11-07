@@ -16,11 +16,11 @@ We turn a raw 3D Gaussian Splatting scan of Valmet's Messukylä boiler/equipment
 
 | Brief criterion (weight) | What we deliver |
 |---|---|
-| Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video; Gemini vision refines them (49/50 on our benchmark). Touching parts of one thing are grouped (**49 multi-part objects from 129 fragments**), 88 boxes get a yaw-oriented frame, and any object can be **isolated** (only its splats shown). An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
+| Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video; Gemini vision refines them (49/50 on our benchmark). Touching parts of one thing are grouped (**49 multi-part objects from 129 fragments**), 88 boxes get a yaw-oriented frame, and any object can be **isolated** (only its splats shown) or downloaded as its own `.ply`. **Scan-to-BIM:** the whole semantic layer exports as **IFC4** (IfcPump, IfcValve, … with the Excel record as property sets; 0 schema errors in ifcopenshell) plus a 2D **floor plan and section A-A** (SVG). An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
 | Obstacle-aware navigation & proximity (25%) | Floor/obstacle occupancy grid from the splat, an A* route with clearance cost, live 1.3 m proximity radius, collision-checked first-person walk mode, and an **inspection tour** over all 13 non-healthy assets ranked by condition × criticality × uncertainty (Builder Question Q-04). |
 | AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`; confidence drops with data-quality flags and a weak 3D identity (Builder Question Q-06); one click drafts a work order (Q-05). The copilot **comments on every asset the avatar passes**, **checks every cited ID** against the retrieved evidence, and runs its own **telemetry anomaly detector** (AUC 0.91 against the pack's labels, Q-02). |
 | Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose, SQLite fallback) implementing every route of the pack's `API_Contract` sheet, live telemetry ingest + MQTT bridge (Q-07), OpenUSD export (Q-09), a static three.js + Spark viewer, `docker compose up` for everything, and CI on every push. |
-| Demo clarity (10%) | One-click mission (Start → walk → arrive → diagnosis → work-order draft), Follow / Orbit / Walk cameras, real-photo asset cards, a scripted **🎬 Demo** mode with captions for the video, 8 slides in `docs/`. |
+| Demo clarity (10%) | One-click mission (Start → walk → arrive → diagnosis → work-order draft), Follow / Orbit / Walk cameras, real-photo asset cards, a scripted **🎬 Demo** mode with captions for the video, a noise-free **🧱 BIM view** from above, **navigation by text** (“go to the nearest degraded valve”, also in Ukrainian), 8 slides in `docs/`. |
 
 ## Quick start
 
@@ -68,6 +68,10 @@ Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) 
 - **🧭 Inspection tour**: walks to all non-healthy assets, urgent first; each stop shows its priority and why.
 - **🔎 Isolate** (in an asset card): only that object's splats, to orbit around it; Esc returns.
 - **🎬 Demo**: a 6-step scripted walkthrough with captions (overview, floor plan, mission, diagnosis, isolation, tour), for recording the video in one take.
+- **🧱 BIM view**: hides the splat and shows solid blocks (red fault, amber warning, green healthy, class colours otherwise) on the walkable floor, from above.
+- **📐 Plan** / **⬇ IFC**: the semantic floor plan with section A-A (SVG), and the Scan-to-BIM model (IFC4) for Revit, Bonsai/BlenderBIM, Solibri or any IFC viewer.
+- **Chat navigation**: type “go to the nearest degraded valve”, “take me to P-005”, “find the washing machine”, “знайди драбину”; the avatar walks the shortest real route (A* in the browser). Questions without a movement verb still go to the copilot.
+- **⬇ PLY** (in an asset card): that object's splats as a standalone `.ply`.
 - **⬇ OpenUSD**: downloads the semantic layer as `.usda` for Omniverse, Unity, Unreal or Blender.
 - **Open splat…**: views any `.ply/.spz/.splat` file.
 
@@ -117,6 +121,7 @@ pipeline/
   gemini_vision.py    Gemini labels for every box from contact sheets of crops -> web/vision_labels.json
   fetch_data.py       downloads the splat from Google Drive when data/ has none
   export_usd.py       scene.json -> OpenUSD (.usda), also served at /api/scene/export.usda
+  export_bim.py       scene.json -> IFC4 (Scan-to-BIM) and the SVG floor plan + section, /api/scene/export.ifc, /plan.svg
   mqtt_bridge.py      MQTT topic plant/<ASSET>/telemetry -> POST /api/telemetry (pip install paho-mqtt)
 server.py             FastAPI: serves web/ + the pack's API_Contract routes, vision, copilot, work-order drafts
 seed_db.py            loads the Excel pack into PostgreSQL (14 sheets -> tables + indexes)
@@ -138,7 +143,8 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 
 | Area | Result |
 |---|---|
-| Splats | 1,676,481, all valid; the viewer gets 621,845 surface splats without view-dependent colour (35 MB instead of 396 MB) |
+| Splats | 1,676,481, all valid; the viewer gets 621,845 surface splats without view-dependent colour as `.spz` (**9.4 MB** instead of 396 MB) |
+| Scan-to-BIM (IFC4) | 414 elements (18 IfcPump, 15 IfcValve, 5 IfcElectricMotor, 9 IfcFlowInstrument, 2 IfcSensor, 44 IfcTank, 15 IfcElectricDistributionBoard, 70 IfcPipeSegment, …), Pset_ValmetAsset on the 30 mapped assets; schema-valid, geometry matches the frames to the millimetre |
 | Room height | floor y −1.17, ceiling y 0.87 (2.04 scan units) |
 | Nav grid | 97×83 cells of 10 cm; 2,276 walkable (+59% after measuring clearance to the real splats; the rest of the floor is clutter or gaps narrower than 0.44 m) |
 | Segmentation | 414 framed objects |
@@ -147,7 +153,7 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 | Inspection tour (Q-04) | 13 stops, 57.2 m: 4 urgent (M-006, P-005, P-002, CV-003), 7 medium, 2 routine; all reachable |
 | Frames | 414 boxes = 49 multi-part objects (129 fragments) + 285 single ones; 88 yaw-oriented |
 | Telemetry detector (Q-02) | AUC 0.91 separating the 13 non-healthy from the 17 healthy assets, without using their labels |
-| Tests | 21 unit tests (6 need the Excel pack and skip in CI) |
+| Tests | 23 unit tests (6 need the Excel pack and skip in CI) |
 | Vision, CLIP only (B/16, prompt ensemble) | 302 / 414 boxes labelled ≥ 0.4 |
 | Vision, saved labels (CLIP + refinement rules + Gemini) | 401 boxes labelled by Gemini, 13 by rules; **49 / 50** on the benchmark (see the caveats in HOW_IT_WORKS §2.3) |
 | Vision benchmark (50 hand-labelled crops) | old setup 30% → **66%** correct; 74% precision on the labels actually shown |
@@ -163,4 +169,5 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 - **The original starter `Industrial Boiler Room.ply` is two-thirds corrupted.** It is random bytes after vertex 502,483, so half the room is missing. Use `Equipment Room.ply`; the pipeline detects and trims the broken file.
 - **Not seen live here:** the narration while walking, the tour and the 🎬 Demo steps after the start were checked by code paths and unit tests, but the browser pane on the dev laptop was hidden, so the animation itself did not run. The Docker image was not built on the dev laptop (no Docker engine running); CI is defined but runs on the first push.
 - **The detector is modest on P-005:** its fouling shows as a slow flow drift; the detector ranks it 14th of 30, and the report says so.
-- **OpenUSD export** is checked for structure locally and opened with `usd-core` in CI only (no ARM wheel).
+- **OpenUSD export** is checked for structure locally and opened with `usd-core` in CI only (no ARM wheel). The IFC export was validated with ifcopenshell 0.9 locally and is again in CI; it was not opened in Revit.
+- **Text navigation** understands tags, ~13 object kinds and 6 conditions by keywords (English, Ukrainian); it is not an LLM, so free phrasing outside those words falls back to the copilot or a short help line.

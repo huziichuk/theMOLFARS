@@ -49,7 +49,46 @@
   #bim-legend .l-ok::before { background:var(--ok); }
   #bim-legend .l-eq::before { background:var(--acc); }
   #bim-legend .l-pipe::before { background:#2d6896; }
-  #loading { position:absolute; inset:0; display:grid; place-items:center; background:#0f1115e0; font-size:16px; }
+  #loading { position:absolute; inset:0; display:grid; place-items:center; background:#0f1115e0; font-size:16px; z-index:30; }
+  /* toolbar: labelled groups, one primary action */
+  #hud { align-items:flex-start; right:12px; }
+  .grp { display:flex; gap:4px; align-items:center; background:#0b0d12cc; border:1px solid var(--line); border-radius:8px; padding:4px; }
+  .grp > small { color:var(--mute); font-size:10px; text-transform:uppercase; letter-spacing:.06em; padding:0 4px; }
+  #hud .grp button, #hud .grp label { background:transparent; border-color:transparent; padding:5px 9px; }
+  #hud .grp button:hover, #hud .grp label:hover, #hud summary:hover { background:#ffffff12; }
+  #hud .grp button[aria-pressed="true"] { background:#4ea1ff22; border-color:var(--acc); }
+  #hud button.primary { background:var(--acc); color:#05121f; border-color:var(--acc); font-weight:600; }
+  #hud button.primary:hover { background:#7bbaff; }
+  #hud details { position:relative; }
+  #hud summary { list-style:none; cursor:pointer; padding:5px 9px; border-radius:6px; }
+  #hud summary::-webkit-details-marker { display:none; }
+  #hud details .menu { position:absolute; right:0; top:34px; background:#11141c; border:1px solid var(--line); border-radius:8px; padding:6px; display:grid; gap:2px; min-width:250px; box-shadow:0 8px 24px #000a; z-index:20; }
+  #hud .menu a, #hud .menu label { color:var(--text); text-decoration:none; padding:6px 8px; border-radius:6px; display:block; background:transparent; border:0; font-size:13px; }
+  #hud .menu a:hover, #hud .menu label:hover { background:#ffffff12; }
+  #hud .menu small { display:block; color:var(--mute); font-size:11px; }
+  /* 3D colour legend */
+  #legend { position:absolute; right:12px; bottom:46px; background:#0b0d12cc; border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:11px; color:var(--mute); z-index:10; display:grid; gap:2px; }
+  #legend b { color:var(--text); font-size:11px; }
+  #legend i { display:inline-block; width:10px; height:10px; border:2px solid; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+  /* first-visit intro */
+  #intro { position:fixed; inset:0; background:#05070acc; display:grid; place-items:center; z-index:50; }
+  #intro[hidden] { display:none; }
+  #intro .card { width:min(640px, 92vw); background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:24px 28px; box-shadow:0 20px 60px #000c; }
+  #intro h1 { margin:0 0 4px; font-size:22px; }
+  #intro p { margin:0 0 14px; color:var(--mute); }
+  #intro ol { margin:0 0 14px; padding-left:20px; display:grid; gap:8px; }
+  #intro ol b { color:var(--text); }
+  #intro .row { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
+  #intro button { font:inherit; border-radius:8px; padding:9px 14px; cursor:pointer; border:1px solid var(--line); background:transparent; color:var(--text); }
+  #intro button.primary { background:var(--acc); color:#05121f; border-color:var(--acc); font-weight:600; }
+  #intro kbd, .msg kbd { background:#ffffff14; border:1px solid var(--line); border-bottom-width:2px; border-radius:4px; padding:0 5px; font:12px ui-monospace, monospace; }
+  /* mission card + quick actions in the chat */
+  #mission .fault { display:flex; gap:8px; align-items:baseline; color:var(--text); }
+  #mission .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); box-shadow:0 0 8px var(--bad); flex:none; }
+  #mission .facts { color:var(--mute); font-size:12px; margin-top:3px; }
+  .quick { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .quick button { font:12px system-ui; padding:5px 10px; border-radius:14px; border:1px solid var(--line); background:#ffffff0a; color:var(--text); cursor:pointer; }
+  .quick button:hover { border-color:var(--acc); color:var(--acc); }
 </style>
 <script type="importmap">
 { "imports": {
@@ -62,44 +101,88 @@
 <body>
 <div id="view">
   <div id="hud">
-    <button id="play">▶ Start mission</button>
-    <button id="tour" title="Visit every non-healthy asset: urgent first, shortest walk within each urgency level (Q-04)">🧭 Inspection tour</button>
-    <button data-mode="follow" aria-pressed="true">Follow</button>
-    <button data-mode="orbit">Orbit</button>
-    <button data-mode="walk">Walk (WASD)</button>
-    <button id="all" aria-pressed="false">All frames</button>
-    <button id="demo" title="Scripted 6-step walkthrough with captions, for recording the demo video">🎬 Demo</button>
-    <a href="api/scene/export.usda" download style="background:#000a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 10px;text-decoration:none" title="The semantic layer as OpenUSD for Omniverse, Unity, Unreal, Blender (Q-09)">⬇ OpenUSD</a>
-    <button id="bim-btn" aria-pressed="true">🗺️ BIM plan</button>
-    <button id="ai">AI labels (CLIP)</button>
-    <button id="gemini-hud" style="border-color:var(--acc);color:var(--acc)">✨ Gemini scan view</button>
-    <label>Open splat… <input id="file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" hidden></label>
+    <div class="grp">
+      <button id="play" class="primary" title="The avatar walks to the faulty pump P-005 and the copilot diagnoses it on arrival">▶ Start mission</button>
+      <button id="tour" title="Visit every asset that is not healthy: the most urgent first, then the shortest walk">🧭 Inspection tour</button>
+      <button id="demo" title="A 2-minute guided walkthrough with captions">🎬 Guided demo</button>
+    </div>
+    <div class="grp"><small>Camera</small>
+      <button data-mode="follow" aria-pressed="true" title="Third person behind the avatar">Follow</button>
+      <button data-mode="orbit" title="Drag to rotate, wheel to zoom">Orbit</button>
+      <button data-mode="walk" title="First person: W A S D or arrow keys">Walk</button>
+    </div>
+    <div class="grp"><small>Show</small>
+      <button id="all" aria-pressed="false" title="Frame every detected object, not only the ones near the avatar">All objects</button>
+      <button id="bimview" aria-pressed="false" title="Hide the scan and show clean blocks coloured by status, seen from above">🧱 BIM view</button>
+      <button id="bim-btn" aria-pressed="true" title="Show or hide the 2D floor plan">🗺️ Mini-map</button>
+    </div>
+    <div class="grp"><small>AI</small>
+      <button id="ai" title="Re-run the in-browser vision model on every object (about 5 minutes; results are already saved)">Re-run AI labels</button>
+      <button id="gemini-hud" title="Ask Gemini to name the objects in the current view (needs GEMINI_API_KEY on the server)">✨ Scan this view</button>
+    </div>
+    <div class="grp">
+      <details><summary title="Download the model for other tools">⬇ Export ▾</summary>
+        <div class="menu">
+          <a href="api/scene/plan.svg" target="_blank">📐 Floor plan + section<small>SVG, opens in a new tab</small></a>
+          <a href="api/scene/export.ifc" download>🏗️ BIM model (IFC4)<small>Revit, Bonsai, Solibri — with the Excel data</small></a>
+          <a href="api/scene/export.usda" download>🌐 OpenUSD<small>Omniverse, Unity, Unreal, Blender</small></a>
+          <label>📂 Open another splat…<small>.ply / .spz / .splat from your disk</small><input id="file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" hidden></label>
+        </div>
+      </details>
+      <button id="help-btn" title="How to use this demo" aria-label="Help">?</button>
+    </div>
   </div>
   <div id="gscan-overlay"></div>
   <div id="bim-panel">
     <div id="bim-head">
-      <span><b>BIM SEMANTIC FLOOR LAYOUT</b> · click: select asset, double-click: teleport</span>
+      <span><b>FLOOR PLAN</b> · click an asset to open it · double-click to jump there</span>
       <button id="bim-size" type="button">⛶ Enlarge</button>
     </div>
     <canvas id="bim-canvas" width="280" height="205"></canvas>
     <div id="bim-legend">
-      <span class="l-bad">Fault</span><span class="l-warn">Maint</span><span class="l-ok">Healthy</span><span class="l-eq">Equipment</span><span class="l-pipe">Pipe/Duct</span>
+      <span class="l-bad">Fault</span><span class="l-warn">Needs attention</span><span class="l-ok">Healthy</span><span class="l-eq">Equipment</span><span class="l-pipe">Pipe / duct</span>
     </div>
   </div>
   <div id="status">Loading…</div>
   <div id="caption" role="status" aria-live="polite"></div>
-  <div id="help">Walk: WASD / arrows (click view for mouse-look, Esc to release) · Orbit: drag / wheel</div>
-  <div id="loading">Loading splat scene…</div>
+  <div id="legend" aria-label="Frame colours">
+    <b>Frame colours</b>
+    <span><i style="border-color:var(--bad)"></i>Faulty device (mission target)</span>
+    <span><i style="border-color:var(--warn)"></i>Needs attention (Excel status)</span>
+    <span><i style="border-color:var(--ok)"></i>Healthy</span>
+    <span><i style="border-color:var(--acc)"></i>Equipment, no Excel record</span>
+    <span><i style="border-color:var(--mute)"></i>Other object</span>
+  </div>
+  <div id="help">Orbit: drag + wheel · Walk: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · <kbd>Esc</kbd> leaves isolation</div>
+  <div id="loading">Loading the 3D scan (≈ 9 MB)…</div>
 </div>
 <aside>
   <h2>Mission</h2>
   <div id="mission" style="margin:0 14px;color:var(--mute)">—</div>
-  <h2>Assets in proximity radius</h2>
+  <h2>Near the avatar (1.3 m)</h2>
   <ul id="nearby"></ul>
   <h2>AI service copilot</h2>
   <div id="chat"></div>
-  <form id="ask"><input id="q" placeholder="Ask about the selected asset…" autocomplete="off"><button>Ask</button></form>
+  <form id="ask"><input id="q" placeholder="Ask, or type “go to a degraded valve”" autocomplete="off" aria-label="Message to the copilot"><button>Send</button></form>
 </aside>
+<div id="intro" hidden role="dialog" aria-modal="true" aria-labelledby="intro-title">
+  <div class="card">
+    <h1 id="intro-title">Boiler-room digital twin</h1>
+    <p>A 3D scan of a Valmet equipment room where every object is framed and linked to maintenance data. An avatar walks to a faulty pump, and an AI copilot explains the fault with evidence.</p>
+    <ol>
+      <li><b>Press ▶ Start mission.</b> The avatar walks a safe route to the faulty pump P-005.</li>
+      <li><b>Watch the frames and the list on the right.</b> Objects within 1.3 m light up; colours show their status (red = fault, amber = needs attention, green = healthy). The copilot comments as you pass.</li>
+      <li><b>On arrival</b> the copilot gives a diagnosis where every claim cites its source, plus a work-order draft.</li>
+      <li><b>Explore:</b> click any label for details, try <b>🧱 BIM view</b> for a clean overview, or type <i>“go to the nearest degraded valve”</i> in the chat.</li>
+    </ol>
+    <p style="margin:0">Camera: <b>Orbit</b> = drag + mouse wheel · <b>Walk</b> = <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrow keys.</p>
+    <div class="row">
+      <button id="intro-explore">Explore on my own</button>
+      <button id="intro-demo">🎬 Guided demo</button>
+      <button id="intro-start" class="primary">▶ Start mission</button>
+    </div>
+  </div>
+</div>
 
 <script type="module">
 import * as THREE from "three";
@@ -143,7 +226,8 @@ function setSplat(opts) {
   splat.rotation.x = Math.PI; // pipeline frame: capture is y-down
   scene.add(splat);
   $("#loading").style.display = "grid";
-  splat.initialized.then(() => { $("#loading").style.display = "none"; wake(2500); });
+  // Spark keeps sorting and uploading for a few seconds after load: render through it, or a still camera shows black
+  splat.initialized.then(() => { $("#loading").style.display = "none"; wake(8000); });
 }
 $("#file").addEventListener("change", async (e) => {
   const f = e.target.files[0]; if (!f) return;
@@ -216,8 +300,11 @@ scene.add(avatar);
 
 // labels come from vision_labels.json / Gemini, so they are text, never markup
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-$("#mission").innerHTML = `Target <b style="color:var(--bad)">${target.asset.tag} [${target.asset.asset_id}]</b> — ${target.asset.asset_class}, ${target.asset.issue_code ?? ""} · health ${target.asset.health_score}<br>
-${S.objects.length} framed objects · ${S.objects.filter((o) => o.asset).length} mapped to Excel · route ${S.path.length} waypoints`;
+const routeM = S.path.slice(1).reduce((m, p, k) => m + Math.hypot(p[0] - S.path[k][0], p[2] - S.path[k][2]), 0);
+const nice = (t) => String(t ?? "").replaceAll("_", " ").toLowerCase();
+$("#mission").innerHTML = `<div class="fault"><span class="dot"></span><span>Faulty device <b>${esc(target.asset.tag)}</b> · ${esc(nice(target.asset.asset_class))}</span></div>
+<div class="facts">${esc(nice(target.asset.issue_code))} · health ${target.asset.health_score}/100 · ${routeM.toFixed(1)} m walk</div>
+<div class="facts">${S.objects.length} objects found in the scan · ${S.objects.filter((o) => o.asset).length} linked to Excel records</div>`;
 
 // ---------- camera modes
 const orbit = new OrbitControls(camera, renderer.domElement);
@@ -246,6 +333,9 @@ function setMode(m) {
   wake(1200);
 }
 renderer.domElement.addEventListener("click", () => mode === "walk" && fps.lock());
+// a still camera renders only while "awake": any pointer movement or coming back to the tab wakes it
+renderer.domElement.addEventListener("pointermove", () => wake(800));
+document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(3000); });
 const keys = {};
 addEventListener("keydown", (e) => { keys[e.code] = true; wake(600); });
 addEventListener("keyup", (e) => {
@@ -323,6 +413,132 @@ $("#demo").onclick = async () => {
     caption(""); demoRunning = false;
   }
 };
+// item 2: BIM view — Valmet: "the point cloud is a bit noisy from far away"; solid blocks give the bird's-eye overview
+const CLASS_HEX = { PUMP: 0x38d996, MOTOR: 0x50c8b4, VALVE: 0xffb43c, GAUGE: 0xbe8cff, SENSOR: 0xbe8cff, TANK: 0x4cafff,
+  CABINET: 0xff78b4, PIPE: 0x6e829b, DUCT: 0x64788c, APPLIANCE: 0xd2d7e1, CART: 0xf0965a, LADDER: 0xdcbe5a, BOX: 0xa59178,
+  CHAIR: 0xa59178, LAMP: 0xe6e68c, STRUCTURE: 0x59606b };
+let bim = null;
+function buildBim() {
+  const group = new THREE.Group();
+  const cv = Object.assign(document.createElement("canvas"), { width: G.w, height: G.h }); // one pixel per grid cell
+  const cx = cv.getContext("2d");
+  cx.fillStyle = "#1b2027"; cx.fillRect(0, 0, G.w, G.h); cx.fillStyle = "#2f6b45";
+  for (let j = 0; j < G.h; j++) for (let i = 0; i < G.w; i++) if (G.walkable[j * G.w + i] === "1") cx.fillRect(i, j, 1, 1);
+  const tex = new THREE.CanvasTexture(cv); tex.magFilter = THREE.NearestFilter;
+  const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(G.w * G.cell, G.h * G.cell), new THREE.MeshBasicMaterial({ map: tex }));
+  floorMesh.rotation.x = -Math.PI / 2; // canvas row 0 = smallest z, which lands on the -z side after this rotation
+  floorMesh.position.set(G.origin[0] + G.w * G.cell / 2, floorY + 0.004, G.origin[1] + G.h * G.cell / 2);
+  group.add(floorMesh);
+  for (const o of objs) {
+    if (o.isFragment) continue; // a group is drawn once, by its lead
+    const vid = o.ai?.id ?? o.vision_id ?? o.cls;
+    const b = o.isoBounds ?? o.obb ?? o;
+    const color = o === target ? 0xff4d4d : o.asset ? (o.asset.condition_state === "healthy" ? 0x3ecf6e : 0xf2b636) : (CLASS_HEX[vid] ?? 0x8b93a3);
+    // equipment-sized blocks are solid; walls, pipe runs and > 1.2 m slabs without an asset stay see-through
+    const solid = o.asset || (["PUMP", "MOTOR", "VALVE", "GAUGE", "SENSOR", "TANK", "CABINET"].includes(vid) && Math.max(...b.size) < 1.2);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(...b.size),
+      new THREE.MeshStandardMaterial({ color, transparent: true, opacity: solid ? 0.9 : 0.28, depthWrite: solid }));
+    mesh.position.set(...b.center);
+    mesh.rotation.y = o.isoBounds ? 0 : -(o.obb?.yaw ?? 0);
+    group.add(mesh);
+  }
+  scene.add(group);
+  return group;
+}
+$("#bimview").onclick = (e) => {
+  if (iso) unisolate();
+  bim ??= buildBim();
+  bim.visible = splat.visible; // toggle: BIM shows exactly when the splat was showing
+  splat.visible = !bim.visible;
+  e.currentTarget.setAttribute("aria-pressed", bim.visible);
+  if (bim.visible) { // bird's-eye: with the splat off there is no ceiling in the way
+    setMode("orbit");
+    const cx = G.origin[0] + G.w * G.cell / 2, cz = G.origin[1] + G.h * G.cell / 2;
+    orbit.target.set(cx, floorY, cz); camera.position.set(cx, floorY + 9, cz + 5);
+  }
+  status(bim.visible ? "BIM view: blocks by status (red fault, amber warning, green healthy) and class; floor = walkable" : "Splat view");
+  wake(1500);
+};
+// item 3: navigation by text. Words -> candidate objects (tag, class, condition) -> the nearest by real walking
+// distance (A* on the same 10 cm grid as the pipeline, in the browser) -> the avatar walks there.
+let navTo = null;
+const CLASS_WORDS = { PUMP: ["pump", "насос"], MOTOR: ["motor", "drive", "мотор", "двигун"], VALVE: ["valve", "клапан", "вентил"],
+  GAUGE: ["gauge", "transmitter", "манометр"], SENSOR: ["sensor", "датчик"], TANK: ["tank", "vessel", "бак", "бойлер"],
+  CABINET: ["cabinet", "switchgear", "panel", "шаф", "щит"], APPLIANCE: ["washing", "пральн"], LADDER: ["ladder", "драбин"],
+  CHAIR: ["chair", "stool", "стіл", "стілец"], CART: ["cart", "trolley", "візок"], BOX: ["box", "bin", "коробк"], LAMP: ["lamp", "ламп"] };
+const ASSET_CLASS_OF = { PUMP: "PROCESS_PUMP", MOTOR: "ELECTRIC_MOTOR", VALVE: "CONTROL_VALVE", GAUGE: "PRESSURE_TRANSMITTER", SENSOR: "VIBRATION_SENSOR" };
+// order matters: "unhealthy" contains "healthy", "несправн" contains "справн"
+const STATE_WORDS = { unhealthy: ["unhealthy", "not healthy", "problem", "broken", "проблем", "зламан"],
+  target: ["fault", "worst", "target", "несправн", "аварі"], attention_required: ["attention", "critical", "urgent", "критич", "термінов"],
+  degraded: ["degraded", "погірш", "деград"], watch: ["watch", "спостереж"], healthy: ["healthy", "справн", "здоров"] };
+const NAV_VERB = /\b(go|take me|navigate|route|walk|bring me|lead me|find|show me|where is|head to)\b|^(веди|йди|піди|знайди|покажи|де |маршрут|проведи)/i;
+const has = (q, words) => words.some((w) => q.includes(w));
+const cellOf = (x, z) => [Math.floor((x - G.origin[0]) / G.cell), Math.floor((z - G.origin[1]) / G.cell)];
+const okCell = (i, j) => i >= 0 && j >= 0 && i < G.w && j < G.h && G.walkable[j * G.w + i] === "1";
+function nearestCell([i0, j0]) { // closest walkable cell, ring by ring
+  for (let r = 0; r < 30; r++) for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++)
+    if (Math.max(Math.abs(di), Math.abs(dj)) === r && okCell(i0 + di, j0 + dj)) return [i0 + di, j0 + dj];
+  return null;
+}
+function gridAStar(s, t) { // 8-connected, no corner cutting; returns cells or null
+  const W = G.w, id = (i, j) => j * W + i, goal = id(...t);
+  const gs = new Float64Array(W * G.h).fill(Infinity), came = new Int32Array(W * G.h).fill(-1), heap = [[0, id(...s)]];
+  gs[id(...s)] = 0;
+  const push = (it) => { heap.push(it); let k = heap.length - 1; while (k && heap[(k - 1) >> 1][0] > heap[k][0]) { [heap[k], heap[(k - 1) >> 1]] = [heap[(k - 1) >> 1], heap[k]]; k = (k - 1) >> 1; } };
+  const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let k = 0; for (;;) { const l = 2 * k + 1, r = l + 1; let m = k;
+    if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === k) break; [heap[k], heap[m]] = [heap[m], heap[k]]; k = m; } } return top; };
+  while (heap.length) {
+    const [, cur] = pop();
+    if (cur === goal) { const out = []; for (let c = cur; c !== -1; c = came[c]) out.push([c % W, (c / W) | 0]); return out.reverse(); }
+    const ci = cur % W, cj = (cur / W) | 0;
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      if (!di && !dj) continue;
+      const ni = ci + di, nj = cj + dj;
+      if (!okCell(ni, nj) || (di && dj && (!okCell(ci + di, cj) || !okCell(ci, cj + dj)))) continue;
+      const ng = gs[cur] + Math.hypot(di, dj), n = id(ni, nj);
+      if (ng < gs[n]) { gs[n] = ng; came[n] = cur; push([ng + Math.hypot(t[0] - ni, t[1] - nj), n]); }
+    }
+  }
+  return null;
+}
+function lineOk(a, b) { const n = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) * 2 + 1;
+  for (let k = 0; k <= n; k++) { const f = k / n; if (!okCell(Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f))) return false; } return true; }
+function smoothCells(c) { const out = [c[0]]; let i = 0; while (i < c.length - 1) { let j = c.length - 1; while (j > i + 1 && !lineOk(c[i], c[j])) j--; out.push(c[j]); i = j; } return out; }
+const toWorld = ([i, j]) => [G.origin[0] + (i + 0.5) * G.cell, floorY, G.origin[1] + (j + 0.5) * G.cell];
+function navigateTo(text) {
+  const q = text.toLowerCase();
+  const tag = text.match(/\b(?:[A-Z]{1,2}-\d{3}|ASSET-\d{3}|OBJ-\d{3})\b/i)?.[0].toUpperCase();
+  const cls = Object.keys(CLASS_WORDS).find((k) => has(q, CLASS_WORDS[k]));
+  const state = Object.keys(STATE_WORDS).find((k) => has(q, STATE_WORDS[k]));
+  if (!NAV_VERB.test(q)) return false; // "what is wrong with P-005?" is a question for the copilot, not a route
+  if (!tag && !cls && !state) {
+    say("bot", "I can walk to a tag (P-005), a kind of object (pump, valve, motor, gauge, sensor, tank, cabinet, washing machine, ladder…) "
+      + "and a condition (degraded, watch, healthy, unhealthy, worst), e.g. “go to the nearest degraded valve”.");
+    return true;
+  }
+  let cands = objs.filter((o) => !o.isFragment);
+  if (tag) cands = cands.filter((o) => o.id === tag || o.asset?.tag === tag || o.asset?.asset_id === tag);
+  if (cls) cands = cands.filter((o) => (o.ai?.id ?? o.vision_id) === cls || (ASSET_CLASS_OF[cls] && o.asset?.asset_class === ASSET_CLASS_OF[cls]));
+  if (state === "target") cands = cands.filter((o) => o === target);
+  else if (state === "unhealthy") cands = cands.filter((o) => o.asset && o.asset.condition_state !== "healthy");
+  else if (state) cands = cands.filter((o) => o.asset?.condition_state === state);
+  if (!cands.length) { say("bot", `I found nothing matching “${text}” in the scene.`); return true; }
+  const here = nearestCell(cellOf(avatar.position.x, avatar.position.z));
+  const best = cands.map((o) => [Math.hypot(o.center[0] - avatar.position.x, o.center[2] - avatar.position.z), o]).sort((a, b) => a[0] - b[0]).slice(0, 25)
+    .map(([, o]) => { const goal = nearestCell(cellOf(o.center[0], o.center[2])); const cells = goal && gridAStar(here, goal); return cells && [cells.length, o, cells]; })
+    .filter(Boolean).sort((a, b) => a[0] - b[0])[0];
+  if (!best) { say("bot", `There is no walkable route to ${cands.length > 1 ? "any of the " + cands.length + " matches" : nameOf(cands[0])}.`); return true; }
+  const [, o, cells] = best;
+  const path = [[avatar.position.x, floorY, avatar.position.z], ...smoothCells(cells).slice(1).map(toWorld)];
+  const len = path.slice(1).reduce((s2, p2, k) => s2 + Math.hypot(p2[0] - path[k][0], p2[2] - path[k][2]), 0);
+  if (iso) unisolate();
+  tour = null; $("#tour").setAttribute("aria-pressed", false);
+  useRoute(path); navTo = o; playing = true; setMode("follow"); $("#play").textContent = "⏸ Pause";
+  const what = o.asset ? `${o.asset.tag} [${o.asset.asset_id}] (${o.asset.condition_state.replace("_", " ")}, health ${o.asset.health_score})` : `${nameOf(o)} [${o.id}]`;
+  say("bot", `🧭 Walking to **${what}**: ${len.toFixed(1)} m` + (cands.length > 1 ? `, the nearest of ${cands.length} matches by walking distance.` : "."));
+  wake(1500);
+  return true;
+}
 let showAll = false;
 $("#all").onclick = (e) => { showAll = !showAll; e.target.setAttribute("aria-pressed", showAll); proximity(); wake(800); };
 
@@ -337,7 +553,8 @@ function stepMission(dt) {
   }
   if (seg >= pts.length - 1) {
     arrived = true; playing = false; $("#play").textContent = "↺ Replay";
-    if (tour) say("bot", `🧭 **Tour complete:** ${tour.done} assets inspected. Select any of them for a full cited diagnosis or a work-order draft.`);
+    if (navTo) { const o = navTo; navTo = null; say("bot", `📍 **Arrived at ${o.asset?.tag ?? nameOf(o)}.**`); select(o); }
+    else if (tour) say("bot", `🧭 **Tour complete:** ${tour.done} assets inspected. Select any of them for a full cited diagnosis or a work-order draft.`);
     else onArrive();
   }
 }
@@ -407,6 +624,7 @@ const isNoise = (o) => {
 let iso = null;
 function isolate(o) {
   if (iso) return unisolate();
+  if (bim?.visible) $("#bimview").click(); // back to the splat: isolation shows real splats
   const mesh = new SplatMesh({ url: `api/objects/${o.id}/splat.ply` });
   mesh.rotation.x = Math.PI;
   scene.add(mesh);
@@ -656,6 +874,7 @@ function select(o) {
       <button type="button" class="ginspect" style="font-size:11px;padding:4px 8px;cursor:pointer">🔍 Inspect (copilot)</button>
       ${o.asset ? `<button type="button" class="gdraft" style="font-size:11px;padding:4px 8px;cursor:pointer">📝 Work-order draft</button>` : ""}
       <button type="button" class="giso" style="font-size:11px;padding:4px 8px;cursor:pointer">🔎 Isolate</button>
+      <a href="api/objects/${o.id}/splat.ply" download="${o.id}.ply" style="font-size:11px;padding:4px 8px;border:1px solid var(--line);border-radius:4px;color:var(--text);text-decoration:none" title="This object's splats as a standalone .ply">⬇ PLY</a>
     </div>`);
   if (o.asset) msg.querySelector(".gdraft").onclick = () => draftWorkOrder(o.asset);
   msg.querySelector(".giso").onclick = () => isolate(o);
@@ -684,7 +903,7 @@ async function onArrive() {
   msg.insertAdjacentHTML("beforeend", ' <button type="button" style="font-size:11px;padding:4px 8px;cursor:pointer">📝 Work-order draft</button>');
   msg.querySelector("button").onclick = () => draftWorkOrder(target.asset);
 }
-$("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); copilot(q); };
+$("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); if (!navigateTo(q)) copilot(q); };
 $("#gemini-hud").onclick = (e) => geminiScanScene(e.currentTarget);
 
 // ---------- Interactive 2D BIM Semantic Floor Layout
@@ -827,9 +1046,8 @@ function applyAI(o, r) {
   if (!r) return;
   o.ai = r;
   if (r.reason) o.reason = r.reason;
-  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (sure(o) ? `${r.label} ${Math.round(r.score * 100)}%` : UNKNOWN)
-    + (o.parts ? ` · ${o.parts} parts` : "");
-  o.lab.element.title = `vision (${r.source}): ${r.label} ${Math.round(r.score * 100)}%${r.reason ? ` — ${r.reason}` : ""}`;
+  o.lab.element.textContent = (o.asset ? `${o.asset.tag} · ` : "") + (sure(o) ? r.label : UNKNOWN); // confidence: in the tooltip
+  o.lab.element.title = `${r.label} — ${Math.round(r.score * 100)}% sure (${r.source})${o.parts ? `, ${o.parts} parts` : ""}${r.reason ? `\n${r.reason}` : ""}\nClick for details`;
   if (!o.asset && sure(o)) {
     if (r.kind === "clutter") {
       o.cls = "none";
@@ -863,7 +1081,7 @@ fetch("vision_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
     applyAI(o, decide(o));
   }
   lastNear = "";
-  if (!$("#chat").children.length) select(target);
+  // the welcome message (below) is the first thing in the chat; the target card opens on arrival or on click
 }).catch(() => {});
 // option 2 output (pipeline/video_lift.py on a GPU PC): multi-view labels + objects found only in the video
 fetch("video_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
@@ -1117,8 +1335,34 @@ $("#ai").onclick = async () => {
 
 // ---------- loop
 function status(t) { $("#status").textContent = t; }
-status("Ready — press Start mission");
-setMode("follow");
+
+// ---------- first-time help: intro dialog once, a welcome with one-click actions in the chat
+const QUICK = {
+  start: ["▶ Start mission", () => $("#play").click()],
+  diagnose: [`🩺 Diagnose ${target.asset.tag}`, () => { select(target); copilot(); }],
+  valve: ["🧭 Go to nearest degraded valve", () => { const t = "go to the nearest degraded valve"; say("user", t); navigateTo(t); }],
+  tour: ["🧭 Inspection tour", () => $("#tour").click()],
+  bim: ["🧱 BIM view", () => $("#bimview").click()],
+};
+function quickActions(div, keys) {
+  div.insertAdjacentHTML("beforeend", `<div class="quick">${keys.map((k) => `<button type="button" data-q="${k}">${esc(QUICK[k][0])}</button>`).join("")}</div>`);
+  div.querySelectorAll(".quick button").forEach((b) => (b.onclick = () => QUICK[b.dataset.q][1]()));
+  return div;
+}
+quickActions(say("bot", `👋 I'm the field-service copilot. The faulty device is **${target.asset.tag}** (${nice(target.asset.issue_code)}, health ${target.asset.health_score}/100). `
+  + "Start the mission and I'll comment on what we pass, or ask me anything about an asset. You can also tell me where to go."),
+  ["start", "diagnose", "valve", "tour", "bim"]);
+const intro = $("#intro");
+const closeIntro = () => { intro.hidden = true; localStorage.setItem("molfars-intro-seen", "1"); };
+$("#intro-start").onclick = () => { closeIntro(); $("#play").click(); };
+$("#intro-demo").onclick = () => { closeIntro(); $("#demo").click(); };
+$("#intro-explore").onclick = closeIntro;
+intro.addEventListener("click", (e) => { if (e.target === intro) closeIntro(); });
+addEventListener("keydown", (e) => { if (e.code === "Escape" && !intro.hidden) closeIntro(); });
+$("#help-btn").onclick = () => { intro.hidden = false; $("#intro-start").focus(); };
+if (!localStorage.getItem("molfars-intro-seen")) { intro.hidden = false; $("#intro-start").focus(); }
+status("Ready — press ▶ Start mission, or ? for help");
+setMode("orbit"); // a newcomer first sees the whole room; ▶ Start mission switches to the follow camera
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);

@@ -28,6 +28,7 @@ from sqlalchemy import create_engine, text
 sys.path.insert(0, str(Path(__file__).parent / "pipeline"))
 from build_scene import URGENCY_ORDER, load_ply, mapping_class, priority, to_world, write_ply  # noqa: E402
 from export_usd import scene_to_usda  # noqa: E402
+from export_bim import scene_to_ifc, scene_to_plan_svg  # noqa: E402
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
@@ -372,7 +373,7 @@ def object_splat(object_id: str):
     out = ROOT / "work" / "isolate" / f"{scene['scene_id']}-{object_id}.ply"
     if not out.exists():
         if not _SPLAT:
-            header, _, rows = load_ply(ROOT / "web" / scene["splat"])
+            header, _, rows = load_ply(ROOT / "web" / "boiler_room_clean.ply")  # the float PLY, not the viewer's .spz
             _SPLAT.update(header=header, rows=rows, w=to_world(rows[:, :3].astype(np.float64)))
         g = next((g for g in scene.get("groups", []) if g["id"] == obj.get("group")), None)  # a multi-part object: all parts
         lo_, hi_ = (np.array(g["bmin"]), np.array(g["bmax"])) if g else (np.array(obj["center"]) - np.array(obj["size"]) / 2,
@@ -391,6 +392,19 @@ def export_usda():
     """Builder question Q-09: the semantic layer as OpenUSD text for Omniverse / Unity / Unreal / Blender."""
     usda = scene_to_usda(json.loads((ROOT / "web" / "scene.json").read_text()))
     return Response(usda, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="boiler_room.usda"'})
+
+
+@app.get("/api/scene/export.ifc")
+def export_ifc():
+    """Scan-to-BIM: every frame as an IFC4 element with the Excel record as a property set."""
+    ifc = scene_to_ifc(json.loads((ROOT / "web" / "scene.json").read_text()))
+    return Response(ifc, media_type="application/x-step", headers={"Content-Disposition": 'attachment; filename="boiler_room.ifc"'})
+
+
+@app.get("/api/scene/plan.svg")
+def plan_svg():
+    """The bird's-eye semantic floor plan + section A-A (open in a browser, print, or drop into a slide)."""
+    return Response(scene_to_plan_svg(json.loads((ROOT / "web" / "scene.json").read_text())), media_type="image/svg+xml")
 
 
 @app.post("/api/telemetry")

@@ -48,7 +48,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 - The header is parsed and the body is read as an `N × P` float32 matrix (`np.frombuffer`, zero-copy).
 - **Sanity mask:** a row is valid if all its values are finite, |xyz| < 50, and log-scales are in (−20, 3).
 - **Corrupted-tail detection.** The whole rest of the file is cut from the first invalid row only if fewer than 50% of the rows after it are valid **and** the file's last 1,000 rows are mostly invalid. A bad block in the middle of an otherwise good file loses only its own rows. `tests/test_build_scene.py` covers a clean file, a garbage tail and a mid-file bad block. The original starter file (`Industrial Boiler Room.ply`) is valid only up to vertex 502,483. After that it holds noise (entropy 7.92 bits/byte, no float structure). Splats are stored in octree order, so the missing part is a whole region of the room.
-- **Slim splat for the viewer.** Only splats that cover surfaces (`max scale > 3 cm` and opacity ≥ 0.08) or are clearly visible (opacity ≥ 0.20) are kept, and the view-dependent colour (`f_rest_*`, 45 of 59 properties) is dropped. That gives 621,845 of 1,676,481 splats and 35 MB instead of 396 MB. Colours no longer change with the viewing angle. The full splat is still used for the grid, the boxes and the vision renders.
+- **Slim splat for the viewer.** Only splats that cover surfaces (`max scale > 3 cm` and opacity ≥ 0.08) or are clearly visible (opacity ≥ 0.20) are kept, and the view-dependent colour (`f_rest_*`, 45 of 59 properties) is dropped. That gives 621,845 of 1,676,481 splats: 35 MB as float PLY (kept for isolation and downloads) and **9.4 MB as Niantic `.spz` v2** (`write_spz`: 24-bit fixed-point positions, byte alpha / DC colour / log-scale, w ≥ 0 quaternion xyz, gzip), which is what the viewer loads. Colours no longer change with the viewing angle. The full splat is still used for the grid, the boxes and the vision renders.
 
 ### 1.2 World frame, floor, ceiling
 - The capture is y-down (COLMAP convention). World = rotate 180° about X: `(x, −y, −z)`. The viewer does the same with `mesh.rotation.x = π`.
@@ -262,6 +262,8 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
 | GET | `/api/priorities` | all 30 assets ranked by the Q-04 rule, with the reason |
 | GET | `/api/objects/{object_id}/splat.ply` | only the splats inside that object's (or its group's) frame, for 🔎 Isolate; cached in `work/isolate/` |
 | GET | `/api/scene/export.usda` | the semantic layer as OpenUSD (Q-09) |
+| GET | `/api/scene/export.ifc` | Scan-to-BIM: IFC4 with one element per frame and the Excel property sets |
+| GET | `/api/scene/plan.svg` | the semantic floor plan + section A-A |
 | POST | `/api/telemetry` | `{asset_id, timestamp?, values, source?}` → appends one live reading (Q-07) |
 | POST | `/api/work-orders/draft` | `{asset_id}` → a work-order **draft** in the `Maintenance_History` shape: priority from urgency, action, numbered steps (lockout first, cases, doc, data-quality checks), evidence IDs, confidence. Nothing is stored or sent |
 | GET | `/health` | `{status: "ok"}` |
@@ -291,6 +293,15 @@ The report and the asset card show the score and the flagged signals; the card d
 ### Narration and citation check
 - **Narration:** while the avatar walks, every Excel asset entering the radius gets one deterministic, cited line from `/api/assets/{id}/brief` (state, health, issue, strongest moving signal, last alarm ID). Tour stops get a stop line with the priority and why.
 - **Citation check:** every answer (Gemini or offline) is scanned for `[ASSET|EVT|WO|CASE|DOC|DQ-…]` IDs and compared with the IDs in the retrieved context; the response carries `citations: {verified, unknown}`. The viewer strikes unknown IDs through in red and prints "✓ N cited IDs verified" or "⚠ … not in the evidence". The offline report and the narration lines verify 100 % by construction (tested).
+
+### Scan-to-BIM and the bird's-eye view
+Valmet's mentors asked on the hackathon channel for a BIM-style semantic floor layout as the technician's overview.
+- **IFC4** (`pipeline/export_bim.py`, `/api/scene/export.ifc`): project → site → building → storey at the floor; every frame becomes an element by its vision class (IfcPump, IfcValve, IfcElectricMotor, IfcFlowInstrument, IfcSensor, IfcTank, IfcElectricDistributionBoard, IfcPipeSegment, IfcDuctSegment, IfcLightFixture, IfcFurniture, else IfcBuildingElementProxy) with a swept-solid box at its yaw-oriented frame, and property sets `Pset_Semantic3D` (object ID, vision class/score/source, group) and `Pset_ValmetAsset` (asset, tag, class, criticality, condition, health, urgency, issue, mission target). World Y-up (x, y, z) → IFC Z-up (x, −z, y − floor). Stable GlobalIds from `uuid5(scene_id + object)`. Written as STEP text, no IFC library; ifcopenshell validates it with 0 schema issues and its geometry matches the frames to the millimetre (also for rotated ones).
+- **Plan + section A-A** (`/api/scene/plan.svg`): walkable floor, frames coloured by class (fault red), Excel tags, mission route, tour with numbered stops, and a vertical cut through the target with floor, ceiling and 1.7 m head height.
+- **🧱 BIM view** in the viewer: the splat off, solid blocks (status colours for assets, class colours otherwise; walls and slabs see-through), the walkable grid as the floor texture, camera from above.
+
+### Navigation by text
+Typed commands with a movement verb ("go", "take me", "find", "веди", "знайди", …) are handled in the browser: the words select candidates by tag, object kind (vision class or Excel class) and condition; the 25 nearest by straight distance get an A* route on the same 10 cm grid (8-connected, no corner cutting, line-of-sight smoothing), and the avatar walks the shortest. On arrival the asset card opens. Anything else goes to the copilot.
 
 ### Live data and portability (Q-07, Q-09)
 - `POST /api/telemetry {asset_id, timestamp?, values}` appends a reading to the same table the pack filled (known numeric columns only); the detector, copilot and sparklines see it at once. `pipeline/mqtt_bridge.py` forwards MQTT topics `plant/<ASSET>/telemetry`; an OPC UA client would post the same way.

@@ -2,6 +2,7 @@
 data/
 # generated, >100 MB / derived from the starter video
 web/boiler_room_clean.ply
+web/boiler_room_clean.spz
 web/frames/
 # video_lift.py working dir and GPU venv
 work/

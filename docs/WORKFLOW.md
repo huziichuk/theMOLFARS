@@ -32,7 +32,7 @@ sequenceDiagram
 3. **Extract the video frames:** `python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1`.
 4. **Start the database and serve:**
    - `docker compose up -d` (PostgreSQL), then `python seed_db.py` (loads the Excel pack; re-run after changing it). Without Docker skip this: the server falls back to SQLite seeded from the same Excel.
-   - `python server.py`, then open http://localhost:8000. Wait for the splat to load (~395 MB, a few seconds).
+   - `python server.py`, then open http://localhost:8000. Wait for the splat to load (9.4 MB `.spz`).
 5. **Run the vision pass once.** Press **AI labels (CLIP)**.
    - The first run downloads CLIP B/16, indexes the video tiles (~4 min) and labels 414 boxes (~3 min). Later runs reuse the cache.
    - The result is saved to `web/vision_labels.json`, so every viewer shows the labels without running it again.
@@ -55,6 +55,7 @@ sequenceDiagram
   - viewer: `RADIUS`, `MAX_LABELS`, `SIM_MIN` in `index.html`.
 
 ## 2. Verification we ran
+- Round 4 (after the Discord channel): 23 unit tests. IFC export (no dangling references, one Pset_Semantic3D per object; with ifcopenshell: schema-valid and the target is an IfcPump tagged P-005; rotated elements checked against their PCA frame by hand), the SVG plan parses as XML, and `.spz` decodes back to the PLY values. In the browser: BIM view, the plan, 9 typed navigation commands (including Ukrainian, a question with a tag that must go to the copilot, and an unknown target), isolation and the per-object PLY download, and the scene loading from `.spz`.
 - Round 3 (items 1–10): 21 unit tests now. New: Q-04 priority ordering and the saved tour (urgent first, path indices increasing), the Q-02 detector (a late step is flagged, a noisy stable signal is not), the citation check (an invented `EVT-99999` is flagged; the offline report and narration verify fully), oriented frames (45° plank gets a yaw, an axis-aligned one does not), groups (touching parts join, assets never), the Drive download (a `.ply` is kept, an HTML page is refused), USD export, and live telemetry ingest (stored, read back, a non-column key refused). A CI dry run without `data/` passes with the 6 database tests skipped.
 - In the browser: narration lines and citation marks, the tour intro, sparklines, isolation (only P-005's 751 splats shown; Esc returns) and the first three 🎬 Demo steps were checked; the walking animation itself was not (hidden pane).
 - Unit tests: `python -m unittest discover tests`:
@@ -112,6 +113,10 @@ sequenceDiagram
 | One target does not show work planning (Q-04) | 13 assets are not healthy | Priority = damage × criticality × (1 + uncertainty); a tour over all of them, urgent first, shortest walk inside each level (57 m). |
 | We only repeated the pack's own diagnosis (Q-02) | `model_confidence` comes from the pack | A robust level + trend detector on the raw telemetry: AUC 0.91 against the pack's labels without seeing them; weak on P-005, said openly. |
 | 414 frames looked like noise on walls and pipe runs | 129 boxes were touching parts of the same thing | Group them (49 objects) and orient 88 frames by PCA, display-only so labels stay valid. |
+| Valmet on the channel: a BIM / semantic floor layout gives technicians the bird's-eye view, and some teams already showed BIM | Scan-to-BIM tools (Moving Atoms, Florent Poux) were the mentors' main links | IFC4 export with the Excel data as property sets, an SVG plan + section, and a BIM view in the viewer. |
+| Valmet: "the point cloud is a bit noisy from far away" | — | 🧱 BIM view: solid blocks on the walkable floor from above. |
+| The avatar could only walk the scripted mission or tour | — | Navigation by text to any tag, kind or condition, routed in the browser. |
+| The viewer downloaded a 35 MB float PLY | — | Niantic `.spz` v2 writer: 9.4 MB, same splats. |
 | Every developer had to copy a 395 MB `.ply` by hand | — | Download from the team's Google Drive on first run, verified and resumable by re-run. |
 | Clicking a 3D label showed no vision data | The click handler captured the raw scene object | The handler is bound to the live object. |
 | `pandas` 3 rejected `agg("first")` | The server crashed during retrieval | Compute first/last/min/max/mean explicitly per series. |
