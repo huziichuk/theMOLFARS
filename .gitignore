@@ -8,3 +8,5 @@ work/
 .venv*/
 __pycache__/
 web/_eval/
+# local env secrets
+.env

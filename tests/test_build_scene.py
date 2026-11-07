@@ -33,5 +33,19 @@ class Sanitize(unittest.TestCase):
         self.assertEqual(len(B.sanitize(r, P)), 3400)
 
 
+class PostgresBackend(unittest.TestCase):
+    def test_asset_context_from_postgres(self):
+        sys.path.insert(0, str(Path(__file__).parents[1]))
+        import server  # noqa: E402
+
+        self.addCleanup(server.engine.dispose)
+        ctx = server.asset_context("ASSET-017")
+        self.assertEqual(ctx["asset"]["tag"], "P-005")
+        self.assertEqual(ctx["state"]["issue_code"], "FOULING")
+        self.assertIn("process_flow_pct", ctx["telemetry_trend_3d"])
+        self.assertTrue(len(ctx["alarms"]) > 0)
+        self.assertTrue(len(ctx["maintenance"]) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

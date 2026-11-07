@@ -3,4 +3,9 @@ scipy
 pandas
 openpyxl
 pillow
-anthropic
+google-genai
+python-dotenv
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
