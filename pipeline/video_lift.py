@@ -23,18 +23,17 @@ from pathlib import Path
 
 import numpy as np
 
-# same vocabulary as the browser pass (web/index.html VOCAB)
-VOCAB = [
-    ("red circulation pump mounted on a pipe", "PROCESS_PUMP"), ("centrifugal pump with electric motor", "PROCESS_PUMP"),
-    ("electric motor", "ELECTRIC_MOTOR"), ("control valve with actuator", "CONTROL_VALVE"), ("hand wheel valve", "CONTROL_VALVE"),
-    ("pressure gauge", "PRESSURE_TRANSMITTER"), ("electrical control cabinet", "CABINET"), ("red expansion vessel tank", "TANK"),
-    ("blue pressure tank", "TANK"), ("white insulated pipe", "PIPE"), ("ladder", "CLUTTER"), ("red plastic storage box", "CLUTTER"),
-    ("cardboard box", "CLUTTER"), ("wire mesh cart", "CLUTTER"), ("office chair", "CLUTTER"), ("bare concrete wall", "CLUTTER"),
-]
+sys.path.insert(0, str(Path(__file__).parent))  # also importable under `python -I` / from another cwd
+from build_scene import load_ply, sane_mask, to_world  # noqa: E402
+
+# one vocabulary for the browser pass and this script
+_V = json.loads((Path(__file__).parents[1] / "web" / "vocab.json").read_text())
+VOCAB = [tuple(v) for v in _V["labels"]]
+PROMPT = _V["prompt"]
 EQUIPMENT = [p for p, c in VOCAB if c not in ("CLUTTER", "PIPE")]
-PROMPT = "a photo of a {} in an industrial boiler room"
 MAX_VIEWS = 6          # best views per box used in the vote
 MIN_BOX_PX = 40        # ignore projections smaller than this
+MIN_SEEN_PTS = 3       # COLMAP points inside a box that a frame must observe, so occluded views don't vote
 
 
 # ------------------------------------------------------------------ math (self-tested)
@@ -129,18 +128,14 @@ def cam_from_world(img):
 
 # ------------------------------------------------------------------ 3: alignment
 def splat_points(ply):
-    raw = Path(ply).read_bytes()
-    end = raw.index(b"end_header\n") + 11
-    props = [l.split()[-1] for l in raw[:end].decode().splitlines() if l.startswith("property")]
-    rows = np.frombuffer(raw[end:], dtype="<f4").reshape(-1, len(props))
+    _, props, rows = load_ply(ply)
     P = {p: i for i, p in enumerate(props)}
+    rows = rows[sane_mask(rows, P)]
     op = 1 / (1 + np.exp(-rows[:, P["opacity"]].astype(np.float64)))
-    xyz = rows[op > 0.5, :3].astype(np.float64)
-    xyz = xyz[np.isfinite(xyz).all(1) & (np.abs(xyz) < 50).all(1)]
-    return np.stack([xyz[:, 0], -xyz[:, 1], -xyz[:, 2]], 1)  # same world frame as build_scene.to_world
+    return to_world(rows[op > 0.5, :3].astype(np.float64))
 
 
-def align(rec, splat_xyz, pairs_file=None):
+def align(rec, splat_xyz, check_path, pairs_file=None):
     """Returns 4x4 matrix world_from_colmap."""
     if pairs_file:
         pairs = json.loads(Path(pairs_file).read_text())  # [{"colmap":[x,y,z],"world":[x,y,z]}, ...]
@@ -166,8 +161,11 @@ def align(rec, splat_xyz, pairs_file=None):
         reg.RANSACConvergenceCriteria(400000, 0.999))
     icp = reg.registration_icp(src_d, tgt_d, v * 1.0, ransac.transformation, reg.TransformationEstimationPointToPoint(True))
     print(f"[align] RANSAC fitness {ransac.fitness:.2f} -> ICP fitness {icp.fitness:.2f}, rmse {icp.inlier_rmse:.3f}")
+    # visual check: splat in grey, aligned COLMAP points in red; open in any point-cloud viewer (CloudCompare, MeshLab)
+    check = src_d.transform(icp.transformation).paint_uniform_color([1, 0, 0]) + tgt_d.paint_uniform_color([0.6, 0.6, 0.6])
+    o3d.io.write_point_cloud(str(check_path), check)
     if icp.fitness < 0.3:
-        print("[align] WARNING: low fitness; check work/align_check.ply or pass --pairs with 4+ hand-picked points")
+        print(f"[align] WARNING: low fitness; inspect {check_path} or pass --pairs with 4+ hand-picked points")
     pre = to_matrix(s0, np.eye(3), -col.mean(0) * s0)
     return np.asarray(icp.transformation) @ pre
 
@@ -178,7 +176,7 @@ def main(a):
     img_dir = work / "images"
     sample_frames(a.video, img_dir, a.fps)
     rec = run_sfm(img_dir, work)
-    W_from_C = align(rec, splat_points(a.ply), a.pairs)
+    W_from_C = align(rec, splat_points(a.ply), work / "align_check.ply", a.pairs)
     C_from_W = np.linalg.inv(W_from_C)
     scale = np.cbrt(abs(np.linalg.det(W_from_C[:3, :3])))
     scene = json.loads(Path(a.scene).read_text())
@@ -208,11 +206,23 @@ def main(a):
         P = cam_from_world(img) @ C_from_W  # 3x4 @ 4x4
         cams.append((img, K, P, (cam.width, cam.height)))
 
-    labels = {}
+    # occlusion check: a frame may vote for a box only if it actually observes COLMAP points inside that box
+    pid_list = list(rec.points3D)
+    pts_world = (W_from_C @ np.c_[np.array([rec.points3D[i].xyz for i in pid_list]), np.ones(len(pid_list))].T).T[:, :3]
+    seen = {img.image_id: {pt.point3D_id for pt in img.points2D if pt.has_point3D()} for img in rec.images.values()}
+
+    labels, unseen = {}, 0
     for o in scene["objects"]:
         corners = np.c_[box_corners(o["center"], o["size"]), np.ones(8)]
+        lo, hi = corners[:, :3].min(0), corners[:, :3].max(0)
+        inside = {pid_list[i] for i in np.flatnonzero(((pts_world >= lo) & (pts_world <= hi)).all(1))}
+        if len(inside) < MIN_SEEN_PTS:
+            unseen += 1  # no SfM evidence this box is visible anywhere: keep the browser label
+            continue
         views = []
         for img, K, P, wh in cams:
+            if len(inside & seen[img.image_id]) < MIN_SEEN_PTS:
+                continue  # box hidden behind something else in this frame
             bb = project(P, K, corners[:, :3], wh)
             if bb:
                 views.append(((bb[2] - bb[0]) * (bb[3] - bb[1]) / bb[4], img, bb))  # big + close first
@@ -229,7 +239,7 @@ def main(a):
         labels[o["id"]] = dict(label=VOCAB[k][0], cls=VOCAB[k][1], score=round(float(p[k]), 3), views=len(crops),
                                frames=[img.name for _, img, _ in views[:MAX_VIEWS]])
     print(f"[labels] {len(labels)}/{len(scene['objects'])} boxes seen in video, "
-          f"{sum(v['score'] >= 0.3 for v in labels.values())} confident")
+          f"{sum(v['score'] >= 0.3 for v in labels.values())} confident, {unseen} without SfM points")
 
     # 5) OWLv2 on frames -> lift detections with COLMAP points inside each 2D box
     owl = Owlv2ForObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble").to(dev).eval()
@@ -272,7 +282,8 @@ def main(a):
     print(f"[owlv2] {len(found)} detections lifted to 3D -> {len(extra)} new objects")
 
     out = Path(a.scene).with_name("video_labels.json")
-    out.write_text(json.dumps(dict(world_from_colmap=W_from_C.round(6).tolist(), colmap_scale=float(scale),
+    out.write_text(json.dumps(dict(scene_id=scene["scene_id"],  # viewer ignores this file for any other scene.json
+                                   world_from_colmap=W_from_C.round(6).tolist(), colmap_scale=float(scale),
                                    registered_frames=len(cams), labels=labels, extra_objects=extra)))
     print(f"[done] wrote {out}")
 

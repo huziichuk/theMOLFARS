@@ -1,0 +1,21 @@
+{
+  "prompt": "a photo of a {} in an industrial boiler room",
+  "labels": [
+    ["red circulation pump mounted on a pipe", "PROCESS_PUMP"],
+    ["centrifugal pump with electric motor", "PROCESS_PUMP"],
+    ["electric motor", "ELECTRIC_MOTOR"],
+    ["control valve with actuator", "CONTROL_VALVE"],
+    ["hand wheel valve", "CONTROL_VALVE"],
+    ["pressure gauge", "PRESSURE_TRANSMITTER"],
+    ["electrical control cabinet", "CABINET"],
+    ["red expansion vessel tank", "TANK"],
+    ["blue pressure tank", "TANK"],
+    ["white insulated pipe", "PIPE"],
+    ["ladder", "CLUTTER"],
+    ["red plastic storage box", "CLUTTER"],
+    ["cardboard box", "CLUTTER"],
+    ["wire mesh cart", "CLUTTER"],
+    ["office chair", "CLUTTER"],
+    ["bare concrete wall", "CLUTTER"]
+  ]
+}

@@ -42,7 +42,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 ### 1.1 Load and sanitize
 - The header is parsed and the body is read as an `N × P` float32 matrix (`np.frombuffer`, zero-copy).
 - **Sanity mask:** a row is valid if all its values are finite, |xyz| < 50, and log-scales are in (−20, 3).
-- **Corrupted-tail detection.** If fewer than 50% of the rows after the first invalid one are valid, everything from that row on is treated as garbage and cut. Otherwise only the invalid rows are dropped. The original starter file (`Industrial Boiler Room.ply`) is valid only up to vertex 502,483. After that it holds noise (entropy 7.92 bits/byte, no float structure). Splats are stored in octree order, so the missing part is a whole region of the room.
+- **Corrupted-tail detection.** The whole rest of the file is cut from the first invalid row only if fewer than 50% of the rows after it are valid **and** the file's last 1,000 rows are mostly invalid. A bad block in the middle of an otherwise good file loses only its own rows. `tests/test_build_scene.py` covers a clean file, a garbage tail and a mid-file bad block. The original starter file (`Industrial Boiler Room.ply`) is valid only up to vertex 502,483. After that it holds noise (entropy 7.92 bits/byte, no float structure). Splats are stored in octree order, so the missing part is a whole region of the room.
 - The cleaned splat is written back with the same header and an updated vertex count.
 
 ### 1.2 World frame, floor, ceiling
@@ -72,7 +72,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 ### 1.5 Excel mapping
 - `Asset_Master` is joined with `Current_State`. The **worst health score becomes the mission target** (ASSET-017, P-005, process pump, fouling, health 44).
 - The mapping is procedural and class-compatible, which the brief explicitly allows. With a fixed seed, each object takes a free asset of the same class first, then of a compatible class (pump ↔ motor; valve ↔ transmitter ↔ vibration sensor). Leftover assets go to the remaining non-pipe, non-storage objects.
-- **Target placement:** the target asset is moved onto a reachable object of exactly its class (≤ 1.3 m from an aisle, because pumps are wall-mounted). If none exists, a compatible class is used (≤ 1.0 m). Among the candidates it picks one far from the start, but not the very edge of the scan.
+- **Target placement:** the target asset is moved onto a reachable object of exactly its class (≤ 1.3 m from an aisle, because pumps are wall-mounted). If none exists, a compatible class is used (≤ 1.0 m), then any equipment box (≤ 2.0 m). If even that is empty, the pipeline stops with a clear message. Among the candidates it picks one far from the start, but not the very edge of the scan. If no box received the target asset during mapping, the box gets the full Master + Current_State record, so health and status are always present.
 
 ### 1.6 Route
 - The start is the walkable cell nearest the left edge of the scan. The goal is the walkable cell nearest the target box.
@@ -90,7 +90,8 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
                 "center": [x, y, z], "size": [sx, sy, sz], "color": [r, g, b],
                 "asset": { "asset_id": "ASSET-017", "tag": "P-005", "condition_state": "…", "health_score": 44, … } | null }],
   "target_object": "OBJ-182", "target_asset": "ASSET-017",
-  "path": [[x, y, z], …]
+  "path": [[x, y, z], …],
+  "scene_id": "dd7b3b0846cb"   // SHA-1 of this output; object IDs are only valid for one pipeline run
 }
 ```
 
@@ -113,7 +114,7 @@ Pressing **AI labels (CLIP)**:
    - The camera is placed on the side of the nearest aisle cell (the view a technician gets), ≥ 0.8 m away because splats blur up close.
    - The main loop is paused. The view is rendered for 3 frames so Spark can re-sort the splats for the new viewpoint.
    - The projected box is cropped as a square with 80% context and scaled to 224².
-3. **Zero-shot labels** against an industrial vocabulary (template "a photo of a {} in an industrial boiler room"):
+3. **Zero-shot labels** against the industrial vocabulary in `web/vocab.json`, which `video_lift.py` also reads (template "a photo of a {} in an industrial boiler room"):
    - equipment: circulation pump, pump with motor, motor, control valve, hand-wheel valve, pressure gauge, control cabinet, red expansion vessel, blue pressure tank, insulated pipe;
    - clutter: ladder, storage box, cardboard box, mesh cart, office chair, concrete wall.
 4. **Thresholds:** a label with score ≥ 0.30 replaces the geometric label. If a box is confidently clutter and not an Excel asset, its frame is faded.
@@ -121,13 +122,13 @@ Pressing **AI labels (CLIP)**:
 ### 2.2 Photo match with the walk-through video
 CLIP struggles on blurry splat renders, while the video shows the same equipment sharply.
 1. `extract_frames.py` produces 112 frames at 1 fps.
-2. Each frame is cut into **13 overlapping square tiles** (3 full-height, 10 half-height), and each tile is embedded with CLIP. The embeddings are computed once, then stored in the browser **Cache API**.
+2. Each frame is cut into **13 overlapping square tiles** (3 full-height, 10 half-height), and each tile is embedded with CLIP. The embeddings are computed once, then stored in the browser **Cache API**, keyed by a hash of the source video that `extract_frames.py` writes into `frames/index.json`.
 3. Each box render is embedded and matched to tiles by **CSLS** (cross-domain similarity local scaling):
    `csls(o, t) = 2·cos(o, t) − r_o − r_t`, where `r` is the mean of the 10 best cosine similarities. With plain cosine, one blank-wall frame was the nearest neighbour of 105 of 414 renders (hubness). CSLS cut that to 37, and the remaining top pairs are visually correct.
 4. Matches with CSLS ≥ 0.03 (calibrated by eye on match pairs) have their sharp tile classified. The photo label wins when it is more confident than the render label.
 5. The asset card shows the render next to the matched real photo, cropped directly from the frame JPEG with CSS (no canvas needed).
 
-Results are stored in `localStorage` (labels and match coordinates) and restored on reload.
+Results are stored in `localStorage` (labels and match coordinates) under the scene's `scene_id`, and restored on reload. A rebuilt scene gets a new `scene_id`, so labels from an older run are never applied to renumbered boxes.
 
 ---
 
@@ -140,16 +141,17 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
    - initial scale from the 5th–95th percentile extents;
    - FPFH features, then RANSAC with a scaled point-to-point estimate (Open3D);
    - ICP with scaling.
-   If the fitness is too low, the user passes ≥ 4 hand-picked point pairs and the Umeyama closed-form similarity is used instead.
+   The script writes `work/align_check.ply` (splat in grey, aligned COLMAP points in red) to check by eye. If the fitness is too low, the user passes ≥ 4 hand-picked point pairs and the Umeyama closed-form similarity is used instead.
 3. **Multi-view labels:**
-   - Each box's 8 corners are projected into every registered frame. Views behind the camera, off-image or smaller than 40 px are rejected.
+   - **Occlusion check:** a frame may vote for a box only if it observes at least 3 of the COLMAP points that lie inside the box. Boxes with fewer than 3 SfM points keep their browser label.
+   - Each box's 8 corners are projected into every remaining frame. Views behind the camera, off-image or smaller than 40 px are rejected.
    - The 6 largest and closest views are kept and padded crops are classified with **CLIP ViT-L/14**.
    - The class probabilities are averaged over the views.
 4. **New objects:**
    - **OWLv2** (`owlv2-base-patch16-ensemble`) detects the equipment vocabulary on about 120 frames.
    - Each detection is lifted to 3D from the COLMAP points observed inside its 2D box: median-centred, outliers trimmed, 10th–90th percentile box.
    - Detections that don't overlap an existing box by more than 30% are added.
-5. **Output:** `web/video_labels.json` (`labels` per object id, `extra_objects`, `world_from_colmap`). The viewer picks it up automatically. Multi-view labels take priority, and the new objects are drawn in cyan.
+5. **Output:** `web/video_labels.json` (`scene_id`, `labels` per object id, `extra_objects`, `world_from_colmap`). The viewer picks it up automatically, but ignores it (with a console warning) if its `scene_id` differs from the current `scene.json`. Multi-view labels take priority, and the new objects are drawn in cyan.
 
 `python pipeline/video_lift.py --selftest` checks the Umeyama fit and the projection math without a GPU.
 

@@ -283,12 +283,13 @@ function say(role, text) {
 }
 async function copilot(question) {
   if (!selected?.asset) return say("bot", "This object is not mapped to an Excel asset.");
+  const h = history; // select() swaps `history` while we wait; the answer belongs to the asset that was asked about
   const wait = say("bot", "…analysing evidence");
   const r = await fetch("api/copilot", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ asset_id: selected.asset.asset_id, question, history }) })
+    body: JSON.stringify({ asset_id: selected.asset.asset_id, question, history: h }) })
     .then((r) => r.json()).catch((e) => ({ error: `Copilot unavailable: ${e.message}` }));
   wait.innerHTML = md(r.answer ?? r.error) + `<div style="color:var(--mute);font-size:11px;margin-top:4px">source: ${r.mode ?? "error"}</div>`;
-  if (r.answer) history.push({ role: "user", content: question ?? "ARRIVED: run full diagnosis." }, { role: "assistant", content: r.answer });
+  if (r.answer) h.push({ role: "user", content: question ?? "ARRIVED: run full diagnosis." }, { role: "assistant", content: r.answer });
 }
 function select(o) {
   selected = o; history = [];
@@ -309,16 +310,11 @@ function onArrive() {
 $("#ask").onsubmit = (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (!q) return; $("#q").value = ""; say("user", q); copilot(q); };
 
 // ---------- client-side AI vision: CLIP zero-shot labels for every 3D frame (transformers.js, no server, no key)
-const VOCAB = [ // prompt -> asset class; CLUTTER = not equipment
-  ["red circulation pump mounted on a pipe", "PROCESS_PUMP"], ["centrifugal pump with electric motor", "PROCESS_PUMP"],
-  ["electric motor", "ELECTRIC_MOTOR"], ["control valve with actuator", "CONTROL_VALVE"], ["hand wheel valve", "CONTROL_VALVE"],
-  ["pressure gauge", "PRESSURE_TRANSMITTER"], ["electrical control cabinet", "CABINET"], ["red expansion vessel tank", "TANK"],
-  ["blue pressure tank", "TANK"], ["white insulated pipe", "PIPE"], ["ladder", "CLUTTER"], ["red plastic storage box", "CLUTTER"],
-  ["cardboard box", "CLUTTER"], ["wire mesh cart", "CLUTTER"], ["office chair", "CLUTTER"], ["bare concrete wall", "CLUTTER"],
-];
+// prompt -> asset class (CLUTTER = not equipment); shared with pipeline/video_lift.py
+const { labels: VOCAB, prompt: PROMPT } = await (await fetch("vocab.json")).json();
 const MIN_SCORE = 0.3; // below this keep the geometric label
 const SIM_MIN = 0.03;  // CSLS margin (render vs video tile) needed to trust the photo match; calibrated by eye on pairs
-const AI_KEY = `clip-labels:v4:${S.objects.length}:${S.target_object}`;
+const AI_KEY = `clip-labels:v5:${S.scene_id}`; // object IDs are only valid for this exact pipeline output
 const nameOf = (o) => (o.ai && o.ai.score >= MIN_SCORE ? o.ai.label : o.label);
 function applyAI(o, r) {
   o.ai = r;
@@ -345,6 +341,10 @@ objs.forEach((o) => {
 // option 2 output (pipeline/video_lift.py on a GPU PC): multi-view labels + objects found only in the video
 fetch("video_labels.json").then((r) => (r.ok ? r.json() : null)).then((v) => {
   if (!v) return;
+  if (v.scene_id !== S.scene_id) { // built for another pipeline run: its object IDs point at different boxes
+    console.warn(`video_labels.json is for scene ${v.scene_id}, this is ${S.scene_id}: ignored, re-run video_lift.py`);
+    return;
+  }
   for (const o of objs) if (v.labels[o.id]) { o.video = v.labels[o.id]; applyAI(o, decide(o)); }
   for (const e of v.extra_objects) {
     const o = makeObj({ ...e, asset: null }, 0x4ec9ff); // cyan = discovered in the video, not in the geometry pass
@@ -387,7 +387,7 @@ async function captureBox(o) {
   capCam.updateProjectionMatrix();
   for (let k = 0; k < 3; k++) { renderer.render(scene, capCam); await nextFrame(); } // let Spark re-sort splats for this view
   renderer.render(scene, capCam);
-  // crop the projected box (square, 25% context) and read pixels in the same task, before the buffer is cleared
+  // crop the projected box (square, 80% context) and read pixels in the same task, before the buffer is cleared
   const W = renderer.domElement.width, H = renderer.domElement.height;
   let x0 = W, y0 = H, x1 = 0, y1 = 0;
   for (const sx of [-0.5, 0.5]) for (const sy of [-0.5, 0.5]) for (const sz of [-0.5, 0.5]) {
@@ -427,7 +427,6 @@ async function embed(raws) { // L2-normalised CLIP image embeddings
     return v.map((x) => x / n);
   });
 }
-const PROMPT = "a photo of a {} in an industrial boiler room";
 async function classify(raws) {
   let out = await clip(raws, VOCAB.map((v) => v[0]), { hypothesis_template: PROMPT });
   if (!Array.isArray(out[0])) out = [out];
@@ -448,8 +447,8 @@ async function indexVideo() {
   const layout = [];
   for (const [s, nx, ny] of [[H, 3, 1], [Math.round(H / 2), 5, 2]])
     for (const x of spots(W, s, nx)) for (const y of spots(H, s, ny)) layout.push({ x, y, s });
-  // embeddings are expensive (~4 s/frame with q8 on WebGPU): keep them in the Cache API after the first run
-  const key = `/tile-embeddings-v1-${idx.files.length}-${W}x${H}`;
+  // embeddings cost ~1 s/frame (fp16 on WebGPU): keep them in the Cache API, keyed by the source video's hash
+  const key = `/tile-embeddings-v2-${idx.source}-${idx.files.length}-${W}x${H}`;
   const cache = await caches.open("valmet-demo");
   const hit = await cache.match(key);
   if (hit) {

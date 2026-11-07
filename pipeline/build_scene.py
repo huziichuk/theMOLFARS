@@ -2,6 +2,7 @@
 
 Usage: python pipeline/build_scene.py data/boiler_room.ply data/builder_pack.xlsx web/
 """
+import hashlib
 import json
 import sys
 from heapq import heappop, heappush
@@ -37,12 +38,15 @@ def sane_mask(rows, P):
     return np.isfinite(rows).all(1) & (np.abs(xyz) < 50).all(1) & (sc > -20).all(1) & (sc < 3).all(1)
 
 
+TAIL_CHECK = 1000     # rows at the end of the file that decide whether the tail is garbage
+
+
 def sanitize(rows, P):
     ok = sane_mask(rows, P)
     bad = np.flatnonzero(~ok)
-    # The provided file is valid for the first ~1/3 rows, then turns to random bytes (only ~15% "sane" by chance).
-    # A corrupted tail is dropped wholesale, isolated bad rows are dropped individually.
-    if len(bad) and ok[bad[0]:].mean() < 0.5:
+    # The original starter file is valid for the first ~1/3 rows, then turns to random bytes (only ~15% "sane" by
+    # chance). Cut wholesale only when the file *ends* in garbage; a bad block mid-file loses just its own rows.
+    if len(bad) and ok[bad[0]:].mean() < 0.5 and ok[-TAIL_CHECK:].mean() < 0.5:
         keep = np.zeros(len(rows), bool)
         keep[:bad[0]] = True
         print(f"[sanitize] corrupted tail from row {bad[0]:,}: keeping {bad[0]:,}/{len(rows):,} splats")
@@ -194,7 +198,7 @@ def map_assets(objs, xlsx, rng):
     master = pd.read_excel(xlsx, "Asset_Master")
     state = pd.read_excel(xlsx, "Current_State")[["asset_id", "health_score", "condition_state", "issue_code", "urgency"]]
     assets = master.merge(state, on="asset_id").sort_values("health_score")
-    target_asset = assets.iloc[0]["asset_id"]              # worst health = the faulty device to visit
+    target = assets.iloc[0].to_dict()                      # worst health = the faulty device to visit
     pool = {c: list(g.sample(frac=1, random_state=1).to_dict("records")) for c, g in assets.groupby("asset_class")}
     order = rng.permutation(len(objs))
     for i in order:  # procedural mapping (allowed by the brief): class-compatible first, then any free asset
@@ -207,7 +211,7 @@ def map_assets(objs, xlsx, rng):
     free = [o for o in objs if "asset" not in o and o["cls"] not in ("PIPE", "STORAGE")]
     for o, a in zip(free, leftovers):
         o["asset"] = a
-    return target_asset
+    return target  # full record (master + current state), also when no box got it
 
 
 # ---------------------------------------------------------------- 6. A* route
@@ -297,14 +301,14 @@ def main(ply, xlsx, outdir):
     for o in objs:
         o["cls"], o["label"] = classify(o, floor)
     rng = np.random.default_rng(7)
-    target_asset = map_assets(objs, xlsx, rng)
+    target = map_assets(objs, xlsx, rng)
+    target_asset, tcls = target["asset_id"], target["asset_class"]
 
     # put the faulty asset on a reachable non-pipe object far from the start
-    start = nearest_walkable(g, (2, g["H"] // 2)) if g["walk"].any() else None
-    tcls = pd.read_excel(xlsx, "Asset_Master").set_index("asset_id").loc[target_asset, "asset_class"]
+    assert g["walk"].any(), "no walkable floor found: check floor detection ([floor] line above)"
+    start = nearest_walkable(g, (2, g["H"] // 2))
     compatible = {tcls, *CLASS_FALLBACK.get(tcls, [])}
-    if not any(o["cls"] in compatible for o in objs):
-        compatible = {o["cls"] for o in objs} - {"PIPE"}
+
     def reachable(classes, max_gap):
         out = []
         for i, o in enumerate(objs):
@@ -317,7 +321,10 @@ def main(ply, xlsx, outdir):
                 out.append((np.hypot(*(np.array(wc) - np.array(start))), i, wc))
         return sorted(out, reverse=True)
 
-    cands = reachable({tcls}, 1.3) or reachable(compatible, 1.0)  # exact class first; wall-mounted pumps sit further from the aisle
+    # exact class first (wall-mounted pumps sit further from the aisle), then compatible, then any equipment box
+    cands = (reachable({tcls}, 1.3) or reachable(compatible, 1.0)
+             or reachable({o["cls"] for o in objs} - {"PIPE", "STORAGE"}, 2.0))
+    assert cands, "no equipment box within 2 m of walkable floor to place the faulty asset on"
     _, ti, goal = cands[min(len(cands) - 1, len(cands) // 8)]  # far, but not the very edge of the scan
     holder = next((o for o in objs if o.get("asset", {}).get("asset_id") == target_asset), None)
     if holder is not objs[ti]:  # swap so the worst-health asset sits on the chosen target object
@@ -326,7 +333,7 @@ def main(ply, xlsx, outdir):
             if holder["asset"] is None:
                 del holder["asset"]
         else:
-            objs[ti]["asset"] = pd.read_excel(xlsx, "Asset_Master").query("asset_id == @target_asset").iloc[0].to_dict()
+            objs[ti]["asset"] = target
 
     cells = astar(g, start, goal)
     assert cells, "no path to target"
@@ -357,6 +364,9 @@ def main(ply, xlsx, outdir):
         target_object=f"OBJ-{ti:03d}", target_asset=target_asset,
         path=path,
     )
+    # fingerprint of this exact result: browser caches and video_labels.json are keyed by it,
+    # because object IDs are only stable for one pipeline run
+    scene["scene_id"] = hashlib.sha1(json.dumps(scene, sort_keys=True).encode()).hexdigest()[:12]
     (out / "scene.json").write_text(json.dumps(scene))
     mapped = sum(1 for o in objs if o.get("asset"))
     print(f"[objects] {len(objs)} framed objects, {mapped} mapped to Excel assets, target {target_asset} -> OBJ-{ti:03d}")

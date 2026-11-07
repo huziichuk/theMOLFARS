@@ -70,6 +70,8 @@ web/
   scene.json          pipeline output (objects, grid, route, mapping)
   floorplan.png       debug/slide image of grid + boxes + route
 docs/                 documentation and figures
+web/vocab.json        CLIP label vocabulary shared by the browser pass and video_lift.py
+tests/                unit tests (python -m unittest discover tests)
 requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 deps
 ```
 

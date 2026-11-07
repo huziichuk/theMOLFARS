@@ -39,13 +39,14 @@ sequenceDiagram
 
 ### Re-running after changes
 - Changing the splat, the Excel file or a pipeline parameter needs only step 2 again. Then do a hard reload in the browser.
-- The vision cache is keyed by the object count and the target. When the scene changes, it is invalidated automatically.
+- Caches never outlive their input. Vision labels and `video_labels.json` are tied to `scene_id` (a hash of `scene.json`), and the video tile embeddings to a hash of the source video. After a rebuild, re-run **AI labels** and, if you use it, `video_lift.py`.
 - Tunable constants:
   - pipeline: top of `build_scene.py` (`VOXEL`, `COLOR_TOL`, `MIN_PTS`, `CELL`, `ROBOT_R`, `HEAD`);
   - viewer: `RADIUS`, `MAX_LABELS`, `MIN_SCORE`, `SIM_MIN` in `index.html`.
 
 ## 2. Verification we ran
-- The pipeline asserts that the route exists and stays on walkable cells.
+- Unit tests: `python -m unittest discover tests` (sanitize: clean file, garbage tail, mid-file bad block).
+- The pipeline asserts that the route exists and stays on walkable cells, and that a target box can be found.
 - `video_lift.py --selftest` checks the Umeyama similarity fit and the projection math.
 - Copilot retrieval ran for all 30 assets plus an unknown ID (KeyError → 404).
 - In the browser we checked the full mission (walk, arrive, diagnosis), the collision in Walk mode, the label cap, the vision pass, the CSLS match pairs (inspected visually) and that the cached results come back after a reload.
