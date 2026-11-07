@@ -12,10 +12,11 @@ flowchart LR
     MP4[Walk-through video .mp4] --> EF[extract_frames.py] --> FR[web/frames/*.jpg]
     MP4 -. GPU PC .-> VL[video_lift.py<br/>COLMAP + CLIP-L + OWLv2] -.-> VJ[web/video_labels.json]
   end
-  subgraph Server["server.py (stdlib HTTP)"]
-    XLSX --> RAG[Relational retrieval<br/>8 Excel sheets]
-    RAG --> LLM{ANTHROPIC_API_KEY?}
-    LLM -- yes --> CL[Claude claude-opus-5-5]
+  subgraph Server["server.py (FastAPI)"]
+    XLSX --> SEED[seed_db.py] --> PG[(PostgreSQL 16<br/>14 tables)]
+    PG --> RAG[Relational retrieval<br/>8 tables per asset]
+    RAG --> LLM{GEMINI_API_KEY?}
+    LLM -- yes --> CL[Gemini gemini-3.5-flash-lite]
     LLM -- no --> OFF[Offline cited report]
   end
   subgraph Browser["Viewer web/index.html"]
@@ -187,17 +188,25 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
 
 ---
 
-## 4. Copilot — `server.py`
+## 4. Backend and copilot — `server.py`, `seed_db.py`
 
-### HTTP API
+### Data store
+- `docker compose up -d` starts PostgreSQL 16 (`molfars-postgres`, port 5432; user, password and database default to `molfars`, overridable via `POSTGRES_*`).
+- `seed_db.py` loads 14 sheets of the Excel pack into same-named lower-case tables. It replaces them on every run and adds indexes on `asset_id`, timestamps, `(asset_class, issue_code)` and `(doc_id, scope)`.
+- `server.py` connects through SQLAlchemy + psycopg (`DATABASE_URL`, default `postgresql+psycopg://molfars:molfars@localhost:5432/molfars`) and reads `.env` with python-dotenv.
+- The pipeline (`build_scene.py`) still reads the Excel file directly for the asset mapping.
+
+### HTTP API (FastAPI, uvicorn on 127.0.0.1)
 | Method | Path | Body / response |
 |---|---|---|
 | GET | `/` and static files | served from `web/` |
-| GET | `/api/assets/{asset_id}` | the full evidence context for one asset (JSON) |
+| GET | `/api/assets` | all assets with their current state |
+| GET | `/api/assets/{asset_id}` | the full evidence context for one asset (JSON); 404 if unknown |
+| POST | `/api/vision` | `{scene_id, model, labels}` → writes `web/vision_labels.json` (scene_id must match `scene.json`, IDs `ABC-123`, ≤ 5 MB, atomic write) |
 | POST | `/api/copilot` | `{asset_id, question?, history?}` → `{mode, answer}` |
 
 ### Retrieval (deterministic and relational)
-There are only 30 assets, so we use no vector store. For the asset ID the server collects:
+There are only 30 assets, so we use no vector store. For the asset ID the server runs parameterised SQL queries and collects:
 - `Asset_Master`: identity and criticality;
 - `Current_State`: health, issue code, confidence and urgency;
 - `Telemetry_Sample_3d`: the trend of every numeric signal (first, last, min, max, mean);
@@ -209,7 +218,7 @@ There are only 30 assets, so we use no vector store. For the asset ID the server
 The result is about 11 k characters of JSON, and every row keeps its evidence ID.
 
 ### Generation
-- **With credentials:** Claude `claude-opus-5-5` through the official `anthropic` SDK, with low effort and a server-side refusal fallback. The system prompt requires 4 sections: *what is wrong*, *why*, *safe next steps (lockout first)* and *data trust*. Every claim must cite IDs (`Builder_Questions` Q-03), and the model may answer only from the context.
+- **With `GEMINI_API_KEY` (or `GOOGLE_API_KEY`):** Google Gemini `gemini-3.5-flash-lite` through the `google-genai` SDK, up to 2,000 output tokens; the evidence context goes into the system instruction and the chat history is passed as turns. The system prompt requires 4 sections: *what is wrong*, *why*, *safe next steps (lockout first)* and *data trust*. Every claim must cite IDs (`Builder_Questions` Q-03), and the model may answer only from the context.
 - **Without credentials, or on any API error:** a templated report from the same context.
   - It lists telemetry signals that moved by more than 8%, and the last alarms and work orders.
   - Steps come from the matching historical cases and the knowledge doc, preceded by permit and lockout.

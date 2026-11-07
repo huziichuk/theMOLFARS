@@ -15,7 +15,8 @@
 | Vision model | CLIP ViT-B/16 (`Xenova/clip-vit-base-patch16`): vision + text towers, fp16 on WebGPU, q8 fallback; 14 classes × prompt ensemble (4 templates); picked on a 50-crop benchmark (B/32, B/16, L/14 tried) | ONNX | browser |
 | Visual prototypes | 129 hand-labelled tiles from the walk-through video | | `web/prototype_tiles.json` |
 | Photo matching | CLIP tile embeddings + CSLS hubness-corrected nearest neighbour; Cache API | | browser |
-| Copilot retrieval | Deterministic relational retrieval over 8 Excel sheets | pandas | `server.py` |
-| LLM | Anthropic Claude `claude-opus-5-5` via the `anthropic` Python SDK (low effort, server-side refusal fallback) | SDK 2.6.0 | `server.py` |
-| Server | Python stdlib `http.server` (`ThreadingHTTPServer`) | | `server.py` |
+| Data store | PostgreSQL 16 (Docker Compose), seeded from the Excel pack by `seed_db.py` (14 tables, indexed) | `postgres:16-alpine` | `docker-compose.yml`, `seed_db.py` |
+| Copilot retrieval | Deterministic relational retrieval, parameterised SQL via SQLAlchemy + psycopg 3, pandas | | `server.py` |
+| LLM | Google Gemini `gemini-3.5-flash-lite` via the `google-genai` SDK; offline evidence template without a key or on API errors | | `server.py` |
+| Server | FastAPI + uvicorn, static files via `StaticFiles`; config from `.env` (python-dotenv) | | `server.py` |
 | Optional multi-view lift | pycolmap (SfM), Open3D (FPFH, RANSAC, ICP with scaling), PyTorch CUDA, Hugging Face `transformers`: CLIP ViT-L/14, OWLv2 base-patch16-ensemble | x64 + NVIDIA GPU | `pipeline/video_lift.py` |

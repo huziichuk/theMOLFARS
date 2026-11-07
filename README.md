@@ -16,13 +16,13 @@ We turn a raw 3D Gaussian Splatting scan of Valmet's Messukylä boiler/equipment
 |---|---|
 | Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video. An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
 | Obstacle-aware navigation & proximity (25%) | Floor/obstacle occupancy grid from the splat, an A* route with clearance cost, live 1.3 m proximity radius, and collision-checked first-person walk mode. |
-| AI diagnostics, grounding (20%) | Deterministic relational retrieval over 8 Excel sheets feeds Claude (`claude-opus-5-5`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`. |
-| Backend architecture (15%) | A modular Python pipeline (`pipeline/`) plus a small stdlib HTTP server. A static three.js + Spark viewer. |
+| AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`. |
+| Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose), and a static three.js + Spark viewer. |
 | Demo clarity (10%) | One-click mission (Start → walk → arrive → diagnosis), Follow / Orbit / Walk cameras, and real-photo asset cards. |
 
 ## Quick start
 
-Requirements: Python ≥ 3.11, ffmpeg on PATH, and a WebGPU browser (Chrome or Edge).
+Requirements: Python ≥ 3.11, ffmpeg on PATH, Docker (for PostgreSQL), and a WebGPU browser (Chrome or Edge).
 
 ```bash
 pip install -r requirements.txt
@@ -39,12 +39,14 @@ The starter data is not in git (size and licence). Put these files in `data/`:
 ```bash
 python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web    # ~5 s
 python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1             # 112 frames
-python server.py                                                                     # http://localhost:8000
+docker compose up -d                                                                 # PostgreSQL 16 on :5432
+python seed_db.py                                                                    # Excel pack -> 14 tables
+python server.py                                                                     # FastAPI on http://localhost:8000
 # in the viewer: press "AI labels (CLIP)" once; then optionally map Excel by what vision saw:
 python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web --vision web/vision_labels.json
 ```
 
-Optional: set `ANTHROPIC_API_KEY` to get LLM answers to free-form copilot questions. Without it the copilot returns a fully cited, templated evidence report.
+Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) to get LLM answers. Without it the copilot returns a fully cited, templated evidence report. `DATABASE_URL` overrides the default `postgresql+psycopg://molfars:molfars@localhost:5432/molfars`.
 
 ### Using the viewer
 - **▶ Start mission**: the avatar walks to the faulty pump P-005; the copilot diagnoses on arrival.
@@ -66,7 +68,9 @@ pipeline/
   build_scene.py      raw .ply -> clean splat, floor, nav grid, 3D boxes, Excel mapping, A* route -> web/scene.json
   extract_frames.py   walk-through video -> web/frames/*.jpg + index.json
   video_lift.py       (GPU PC) COLMAP + CLIP-L + OWLv2 multi-view labels and new objects -> web/video_labels.json
-server.py             static server for web/ + grounded copilot API over the Excel pack
+server.py             FastAPI: serves web/ + asset / vision / copilot API over PostgreSQL
+seed_db.py            loads the Excel pack into PostgreSQL (14 sheets -> tables + indexes)
+docker-compose.yml    PostgreSQL 16 for the server
 web/
   index.html          three.js + Spark viewer, mission, proximity UI, copilot chat, in-browser CLIP vision
   scene.json          pipeline output (objects, grid, route, mapping)
@@ -93,11 +97,11 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 | Vision (CLIP B/16, 14 classes, prompt ensemble) | **302 / 414** boxes confidently labelled (≥ 0.4); the rest read "Unidentified object" |
 | Vision benchmark (50 hand-labelled crops) | old setup 30% → **66%** correct; 74% precision on the labels actually shown |
 | Excel mapping after `--vision` | all 30 assets on boxes vision sees as pumps / valves / gauges / motors (before: 11 on walls, 4 on boxes) |
-| Copilot | offline evidence mode verified for all 30 assets in ~0.3 s |
+| Copilot | offline evidence report verified for all 30 assets on the earlier stdlib server; the FastAPI + PostgreSQL version is covered by `tests` (`PostgresBackend`, needs a seeded database) |
 
 ## Known limits
-- **The Claude path of the copilot has not been exercised**: no API key was available while we built it. The offline evidence path is verified.
+- **The Gemini path of the copilot needs `GEMINI_API_KEY`** and was not exercised while writing these docs. The offline evidence path is the fallback on any API error.
 - **`pipeline/video_lift.py` is untested end to end.** It was written for an x64 + CUDA machine; only its math self-test and syntax check ran on the ARM dev laptop.
-- **Boxes come from geometry.** Some are fragments of walls or pipes. Many keep generic types when vision confidence is below 0.30.
+- **Boxes come from geometry.** Some are fragments of walls or pipes. Boxes with vision confidence below 0.4 read "Unidentified object".
 - **The original starter `Industrial Boiler Room.ply` is two-thirds corrupted.** It is random bytes after vertex 502,483, so half the room is missing. Use `Equipment Room.ply`; the pipeline detects and trims the broken file.
 - **The splat is served unconverted (~395 MB).** Converting it to `.spz` would load much faster.

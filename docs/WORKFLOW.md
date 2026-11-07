@@ -7,18 +7,21 @@ sequenceDiagram
   participant D as data/ (starter pack)
   participant P as pipeline/*.py
   participant W as web/
-  participant S as server.py
+  participant G as PostgreSQL
+  participant S as server.py (FastAPI)
   participant B as Browser
   D->>P: equipment_room.ply + builder_pack.xlsx
   P->>W: scene.json, boiler_room_clean.ply, floorplan.png (build_scene.py, ~5 s)
   D->>P: boiler_room_360.mp4
   P->>W: frames/*.jpg + index.json (extract_frames.py)
   Note over P,W: optional, on a GPU PC: video_lift.py -> video_labels.json
+  D->>G: builder_pack.xlsx (seed_db.py)
   S->>B: serves web/ on :8000
   B->>B: render splat + boxes, run mission
   B->>B: (button) CLIP vision + video photo match, cached
   B->>S: POST /api/copilot on arrival / chat
-  S->>B: cited diagnosis (Claude or offline evidence)
+  S->>G: evidence queries for the asset
+  S->>B: cited diagnosis (Gemini or offline evidence)
 ```
 
 ### Step by step
@@ -27,7 +30,9 @@ sequenceDiagram
    - Read the log: sanitize counts, floor and ceiling heights, grid size, number of walkable cells, objects, route length.
    - Check `web/floorplan.png`. Green is walkable, red is obstacle, blue are boxes, the red box is the target and yellow is the route.
 3. **Extract the video frames:** `python pipeline/extract_frames.py data/boiler_room_360.mp4 web/frames 1`.
-4. **Serve:** `python server.py`, then open http://localhost:8000. Wait for the splat to load (~395 MB, a few seconds).
+4. **Start the database and serve:**
+   - `docker compose up -d` (PostgreSQL), then `python seed_db.py` (loads the Excel pack; re-run after changing it).
+   - `python server.py`, then open http://localhost:8000. Wait for the splat to load (~395 MB, a few seconds).
 5. **Run the vision pass once.** Press **AI labels (CLIP)**.
    - The first run downloads CLIP B/16, indexes the video tiles (~4 min) and labels 414 boxes (~3 min). Later runs reuse the cache.
    - The result is saved to `web/vision_labels.json`, so every viewer shows the labels without running it again.
@@ -38,24 +43,25 @@ sequenceDiagram
    - run `python pipeline/video_lift.py --selftest`;
    - run `python pipeline/video_lift.py data/boiler_room_360.mp4 web/scene.json data/equipment_room.ply work --fps 2`;
    - copy `web/video_labels.json` to the demo machine and reload the viewer.
-8. **Optional:** `ANTHROPIC_API_KEY=… python server.py` turns on LLM answers to free-form questions.
+8. **Optional:** put `GEMINI_API_KEY=…` in `.env` (git-ignored) and restart `server.py` to turn on LLM answers to free-form questions.
 
 ### Re-running after changes
 - Changing the splat, the Excel file or a pipeline parameter needs only step 2 again. Then do a hard reload in the browser.
-- Caches never outlive their input. Vision labels and `video_labels.json` are tied to `scene_id` (a hash of `scene.json`), and the video tile embeddings to a hash of the source video. After a rebuild, re-run **AI labels** and, if you use it, `video_lift.py`.
+- Caches never outlive their input. Vision labels and `video_labels.json` are tied to `scene_id` (a hash of the box geometry, so a re-map with `--vision` keeps them valid), and the video tile embeddings to a hash of the source video. After a rebuild, re-run **AI labels** and, if you use it, `video_lift.py`.
 - Tunable constants:
   - pipeline: top of `build_scene.py` (`VOXEL`, `COLOR_TOL`, `MIN_PTS`, `CELL`, `ROBOT_R`, `HEAD`);
-  - viewer: `RADIUS`, `MAX_LABELS`, `MIN_SCORE`, `SIM_MIN` in `index.html`.
+  - vision: `model`, `min_score`, `proto_weight`, classes and prompts in `web/vocab.json`;
+  - viewer: `RADIUS`, `MAX_LABELS`, `SIM_MIN` in `index.html`.
 
 ## 2. Verification we ran
-- Unit tests: `python -m unittest discover tests` (sanitize: clean file, garbage tail, mid-file bad block).
+- Unit tests: `python -m unittest discover tests` (sanitize: clean file, garbage tail, mid-file bad block; `PostgresBackend` checks the evidence context for ASSET-017 and needs the seeded database running).
 - Vision benchmark: 50 hand-labelled render crops (`tests/vision_eval.json`) × 3 models × 6 variants. See HOW_IT_WORKS §2.1.
 - The pipeline asserts that the route exists and stays on walkable cells, and that a target box can be found.
 - `video_lift.py --selftest` checks the Umeyama similarity fit and the projection math.
-- Copilot retrieval ran for all 30 assets plus an unknown ID (KeyError → 404).
+- Copilot retrieval ran for all 30 assets plus an unknown ID (KeyError → 404) on the earlier stdlib/pandas server; the PostgreSQL retrieval keeps the same queries and output shape.
 - In the browser we checked the full mission (walk, arrive, diagnosis), the collision in Walk mode, the label cap, the vision pass, the CSLS match pairs (inspected visually) and that the cached results come back after a reload.
 - **Not verified:**
-  - the Claude path of the copilot (no API key was available);
+  - the Gemini path of the copilot while writing these docs (needs `GEMINI_API_KEY`);
   - `video_lift.py` end to end (it needs an x64 + CUDA machine);
   - non-Chromium browsers.
 
@@ -99,8 +105,8 @@ sequenceDiagram
 | Git, GitHub | Version control (this repository) |
 
 ### Inside the solution
-See [TECH_NOTE.md](../TECH_NOTE.md) for versions: three.js, Spark, transformers.js + CLIP, the Anthropic SDK, and the optional pycolmap, Open3D, PyTorch, CLIP-L and OWLv2.
+See [TECH_NOTE.md](../TECH_NOTE.md) for versions: three.js, Spark, transformers.js + CLIP, FastAPI, PostgreSQL, the Gemini SDK, and the optional pycolmap, Open3D, PyTorch, CLIP-L and OWLv2.
 
 ## 6. Hardware notes
-- **Dev laptop:** Windows 11 on ARM64. No PyTorch, OpenCV or pycolmap wheels exist for Python 3.14 arm64, so all ML runs in the browser on WebGPU there.
+- **Dev laptop:** Windows 11 on ARM64. No PyTorch, OpenCV or pycolmap wheels exist for Python 3.14 arm64, so all ML runs in the browser on WebGPU there. `psycopg-binary` has no wheel there either: the server needs a system libpq (PostgreSQL client) on that machine, or run it on x64.
 - **GPU PC:** i9-14th gen, RTX 4070 Laptop, 32 GB. This is the target for `video_lift.py`. Install the CUDA build of PyTorch from pytorch.org first. pycolmap from pip runs SIFT on the CPU, which takes minutes on an i9.
