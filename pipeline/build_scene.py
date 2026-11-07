@@ -313,7 +313,57 @@ def geometry_id(objs):
 ROOM_RULES_SCENE = "9dd32119e0b1"
 
 
-def refine_vision(o, entry, floor, vocab_by_id, room_rules=False):
+def refine_vision(o, entry, floor, vocab_by_id, room_rules=False, min_score=0.4):
+    """Fuse 3D bounding-box geometry, BIM/spatial layout priors, and splat color with CLIP/Gemini predictions,
+    then check the result against the independent multi-view VLM label (pipeline/vlm_classify.py), when present."""
+    pred = _refine_single_view(o, entry, floor, vocab_by_id, room_rules)
+    return fuse_multiview(pred, entry, vocab_by_id, min_score) if pred else pred
+
+
+CONFIRMED_SCORE = 0.75   # two independent models agree; the VLM's own 0.9 is not calibrated, so it is not used
+
+
+def fuse_multiview(pred, entry, vocab_by_id, min_score=0.4):
+    """entry["multiview"]: one label per box from 3-6 rendered viewpoints + the video tile (Qwen3-VL on a GPU PC).
+    It is an independent second opinion: agreement confirms a label (on the 50-crop benchmark every box where it
+    agreed with Gemini was right), disagreement caps the confidence and shows the alternative, and a weak or
+    missing single-view label is replaced by it."""
+    mv = entry.get("multiview") or {}
+    if mv.get("id") not in vocab_by_id or mv.get("views", 0) < 2:
+        return pred
+    pred = dict(pred)
+    gem = entry.get("gemini") or {}
+    sig = (mv.get("prior_top3") or [[None]])[0][0]  # SigLIP multi-view top-1, a second independent voter
+    ms = float(mv.get("score", 0))
+
+    def labelled(cid, score, src, reason):
+        c = vocab_by_id[cid]
+        return dict(id=cid, label=c["name"], kind=c["kind"], asset_class=c["asset_class"],
+                    score=round(float(score), 3), source=src, reason=reason)
+
+    if gem.get("id") == mv["id"] and gem.get("score", 0) > 0:
+        out = labelled(mv["id"], max(float(gem.get("score", 0)), CONFIRMED_SCORE), f"{gem.get('source', 'gemini')}+multiview",
+                       gem.get("reason") or mv.get("reason", ""))
+        out["label"] = gem.get("label") or out["label"]
+        out["confirmed"] = True
+        return out
+    if pred.get("id") == mv["id"]:
+        pred["score"] = round(max(float(pred.get("score", 0)), CONFIRMED_SCORE), 3)
+        pred["source"] = f"{pred.get('source', 'vision')}+multiview"
+        pred["confirmed"] = True
+        return pred
+    if float(pred.get("score", 0)) >= min_score:  # contested: keep the label, cap the confidence, show the alternative
+        # two independent voters (VLM + SigLIP) on the same alternative cap harder than the VLM alone, which is
+        # weak on small parts (it calls many pumps, valves and gauges "pipe")
+        pred["score"] = round(min(float(pred.get("score", 0)), 0.45 if sig == mv["id"] else 0.6), 3)
+        pred["alt"] = dict(id=mv["id"], label=vocab_by_id[mv["id"]]["name"], score=ms, source="multiview")
+        pred["reason"] = (str(pred.get("reason", "")) + f" Multi-view VLM instead sees: {vocab_by_id[mv['id']]['name']} ({ms:.2f}).").strip()
+        return pred
+    # weak single-view label: the multi-view one takes over; two independent models agreeing earn a shown label
+    return labelled(mv["id"], 0.6 if sig == mv["id"] else 0.38, "multiview", mv.get("reason", ""))
+
+
+def _refine_single_view(o, entry, floor, vocab_by_id, room_rules=False):
     """Fuse 3D bounding-box geometry, BIM/spatial layout priors, and splat color with CLIP/Gemini predictions."""
     if not entry:
         return None
@@ -489,7 +539,7 @@ def apply_vision(objs, path, geo_id, floor=0.0, base_geo_id=None):
     for i, o in enumerate(objs):
         oid = f"OBJ-{i:03d}"
         entry = v["labels"].get(oid)
-        f = refine_vision(o, entry, floor, vocab_by_id, room_rules=(base_geo_id or geo_id) == ROOM_RULES_SCENE)
+        f = refine_vision(o, entry, floor, vocab_by_id, room_rules=(base_geo_id or geo_id) == ROOM_RULES_SCENE, min_score=min_score)
         if entry is not None and f is not None:
             if entry.get("gemini") and entry["gemini"].get("id") != f.get("id"):
                 entry.pop("gemini", None)
@@ -521,9 +571,13 @@ CLASS_FALLBACK = {"PROCESS_PUMP": ["ELECTRIC_MOTOR"], "ELECTRIC_MOTOR": ["PROCES
                   "VIBRATION_SENSOR": ["PRESSURE_TRANSMITTER", "CONTROL_VALVE", "ELECTRIC_MOTOR"]}
 
 
+ASSET_VISION_IDS = ("PUMP", "MOTOR", "VALVE", "GAUGE", "SENSOR")   # vocab.json classes with an asset_class
+
+
 def asset_fit_score(o, asset_cls):
     """Score how physically realistic a 3D box is for a given Excel asset_class."""
-    if o["cls"] in NOT_ASSETS or o.get("vision_id") in ("STRUCTURE", "PIPE", "DUCT", "LAMP", "BOX", "CHAIR", "LADDER", "CART", "APPLIANCE"):
+    # only vocab classes that carry an Excel asset_class may hold an asset (a tank or cabinet box never gets a pump)
+    if o["cls"] in NOT_ASSETS or (o.get("vision_id") is not None and o["vision_id"] not in ASSET_VISION_IDS):
         return -1e6
     s = o["bmax"] - o["bmin"]
     dmax, dmin, h = float(max(s)), float(min(s)), float(s[1])
@@ -545,7 +599,19 @@ def asset_fit_score(o, asset_cls):
     return exact_bonus + seen_bonus + size_ok + sc
 
 
-def map_assets(objs, xlsx, rng):
+REACH_M = 1.5   # a box whose nearest walkable cell is farther than this cannot be inspected from the floor (plan_tour skips it)
+
+
+def map_assets(objs, xlsx, rng, g=None):
+    """Assign the Excel assets to the boxes that fit them best. With the nav grid, boxes nobody can reach from the
+    floor are penalised so a degraded asset lands on a box the inspection tour can actually visit."""
+    unreachable = set()
+    if g is not None:
+        for i, o in enumerate(objs):
+            c = world_to_cell(g, (o["bmin"] + o["bmax"]) / 2)
+            goal = nearest_walkable(g, c)
+            if np.hypot(goal[0] - c[0], goal[1] - c[1]) * CELL > REACH_M:
+                unreachable.add(i)
     master = pd.read_excel(xlsx, "Asset_Master")
     state = pd.read_excel(xlsx, "Current_State")[["asset_id", "health_score", "condition_state", "issue_code", "urgency", "model_confidence"]]
     assets = master.merge(state, on="asset_id").sort_values("health_score")
@@ -559,8 +625,8 @@ def map_assets(objs, xlsx, rng):
         for i, o in enumerate(objs):
             if i in used or o["cls"] in NOT_ASSETS:
                 continue
-            sc = asset_fit_score(o, acls)
-            if sc > best_sc:
+            sc = asset_fit_score(o, acls) - (3.0 if i in unreachable else 0.0)
+            if sc > best_sc and sc > -1e5:  # a rejected box (wall, pipe, tank...) never gets an asset
                 best_sc, best_i = sc, i
         if best_i is not None:
             objs[best_i]["asset"] = a
@@ -733,7 +799,7 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     if vision:
         print(f"[vision] {apply_vision(objs, vision, geo_id, floor=floor, base_geo_id=base_geo_id)} boxes take their class from {vision}")
     rng = np.random.default_rng(7)
-    target = map_assets(objs, xlsx, rng)
+    target = map_assets(objs, xlsx, rng, g)
     target_asset, tcls = target["asset_id"], target["asset_class"]
 
     # put the faulty asset on a reachable non-pipe object far from the start

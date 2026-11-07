@@ -1,7 +1,9 @@
-# Option 2 (pipeline/video_lift.py) on an x64 PC with an NVIDIA GPU.
+# GPU PC extras: multiview_classify.py / vlm_classify.py (and the registration-based video_lift.py).
 # Install CUDA PyTorch first, from https://pytorch.org/get-started/locally/ (pick your CUDA version), e.g.
-#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# (torchvision is needed by the Qwen3-VL processor; take it from the same index as torch)
 -r requirements.txt   # video_lift.py reuses build_scene.py (PLY reader, world frame)
 pycolmap
 open3d
 transformers
+huggingface_hub

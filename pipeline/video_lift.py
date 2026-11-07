@@ -192,17 +192,19 @@ def main(a):
     print(f"[models] torch on {dev}")
     clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(dev).eval()  # bigger than the browser model
     cproc = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
+    # transformers >= 5 returns a ModelOutput whose pooler_output is the projected embedding; < 5 returns the tensor
+    feat = lambda out: out if torch.is_tensor(out) else out.pooler_output
     with torch.no_grad():  # one embedding per class: mean over prompts x templates (prompt ensemble), as in the browser
         emb = []
         for c in CLASSES:
             t = cproc(text=[tp.format(p) for p in c["prompts"] for tp in TEMPLATES], return_tensors="pt", padding=True).to(dev)
-            emb.append(torch.nn.functional.normalize(clip.get_text_features(**t), dim=-1).mean(0))
+            emb.append(torch.nn.functional.normalize(feat(clip.get_text_features(**t)), dim=-1).mean(0))
         text_emb = torch.nn.functional.normalize(torch.stack(emb), dim=-1)
 
     def clip_probs(crops):
         with torch.no_grad():
             x = cproc(images=crops, return_tensors="pt").to(dev)
-            im = torch.nn.functional.normalize(clip.get_image_features(**x), dim=-1)
+            im = torch.nn.functional.normalize(feat(clip.get_image_features(**x)), dim=-1)
             return (100 * im @ text_emb.T).softmax(-1).cpu().numpy()
 
     # camera list in world-aligned form: P maps splat-world -> camera
@@ -260,7 +262,9 @@ def main(a):
             x = oproc(text=[[p for p, _ in EQUIPMENT]], images=im, return_tensors="pt").to(dev)
             out = owl(**x)
         sz = max(im.size)
-        det = oproc.post_process_object_detection(out, threshold=0.25, target_sizes=torch.tensor([[sz, sz]]).to(dev))[0]
+        # transformers >= 5 renamed post_process_object_detection; same boxes/scores/labels output
+        post = getattr(oproc, "post_process_object_detection", None) or oproc.post_process_grounded_object_detection
+        det = post(out, threshold=0.25, target_sizes=torch.tensor([[sz, sz]]).to(dev))[0]
         obs = [(pt.xy, pt.point3D_id) for pt in img.points2D if pt.has_point3D()]
         for box, score, lab in zip(det["boxes"].cpu().numpy(), det["scores"].cpu().numpy(), det["labels"].cpu().numpy()):
             inside = [W_from_C @ pts3d[pid] for xy, pid in obs if box[0] <= xy[0] <= box[2] and box[1] <= xy[1] <= box[3]]

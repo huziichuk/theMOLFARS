@@ -1,4 +1,5 @@
 """python -m unittest discover tests"""
+import json
 import os
 import sys
 import unittest
@@ -47,7 +48,8 @@ class InspectionTour(unittest.TestCase):
     def test_saved_tour_visits_every_non_healthy_asset_urgent_first(self):
         t = SAVED["scene"]["tour"]
         sick = {o["asset"]["asset_id"] for o in SAVED["scene"]["objects"] if o.get("asset") and o["asset"]["condition_state"] != "healthy"}
-        self.assertEqual({st["asset_id"] for st in t["stops"]} | set(t["skipped"]) >= sick, True)
+        skipped = {o["asset"]["asset_id"] for o in SAVED["scene"]["objects"] if o.get("asset") and o["asset"]["tag"] in t["skipped"]}
+        self.assertEqual({st["asset_id"] for st in t["stops"]} | skipped >= sick, True)  # skipped holds tags, stops ids
         tiers = [B.URGENCY_ORDER[st["urgency"]] for st in t["stops"]]
         self.assertEqual(tiers, sorted(tiers))
         idx = [st["path_index"] for st in t["stops"]]
@@ -380,6 +382,45 @@ class PostgresBackend(unittest.TestCase):
         sctx = server.object_scene_context(obj["id"])
         self.assertEqual(sctx["object_id"], obj["id"])
         self.assertEqual(sctx["dimensions_m"]["height_y"], obj["size"][1])
+
+
+class MultiViewFusion(unittest.TestCase):
+    """fuse_multiview: the GPU multi-view VLM label is a second opinion, never a silent overwrite."""
+    vocab = {c["id"]: c for c in json.loads((Path(__file__).parents[1] / "web" / "vocab.json").read_text())["classes"]}
+
+    def pred(self, cid, score, src="gemini-x"):
+        c = self.vocab[cid]
+        return dict(id=cid, label=c["name"], kind=c["kind"], asset_class=c["asset_class"], score=score, source=src, reason="r")
+
+    def test_agreement_confirms_and_lifts_confidence(self):
+        entry = dict(gemini=self.pred("PUMP", 0.55), multiview=dict(id="PUMP", score=0.9, views=4))
+        f = B.fuse_multiview(self.pred("PUMP", 0.55), entry, self.vocab)
+        self.assertTrue(f["confirmed"]) and self.assertEqual(f["id"], "PUMP")
+        self.assertEqual(f["score"], B.CONFIRMED_SCORE)  # not the VLM's own 0.9
+        self.assertIn("multiview", f["source"])
+
+    def test_disagreement_keeps_label_caps_score_and_shows_alternative(self):
+        entry = dict(multiview=dict(id="PIPE", score=0.9, views=3, prior_top3=[["PIPE", 0.4]]))
+        f = B.fuse_multiview(self.pred("TANK", 0.94), entry, self.vocab)
+        self.assertEqual(f["id"], "TANK")
+        self.assertEqual(f["score"], 0.45)  # VLM and SigLIP both say PIPE
+        self.assertEqual(f["alt"]["id"], "PIPE")
+        self.assertIn("Multi-view VLM instead sees", f["reason"])
+        entry["multiview"]["prior_top3"] = [["TANK", 0.4]]
+        self.assertEqual(B.fuse_multiview(self.pred("TANK", 0.94), entry, self.vocab)["score"], 0.6)  # VLM alone
+
+    def test_weak_label_is_replaced_shown_only_when_two_models_agree(self):
+        entry = dict(multiview=dict(id="LADDER", score=0.9, views=3, prior_top3=[["LADDER", 0.5]]))
+        f = B.fuse_multiview(self.pred("TANK", 0.2, "render"), entry, self.vocab)
+        self.assertEqual((f["id"], f["source"], f["score"]), ("LADDER", "multiview", 0.6))
+        entry["multiview"]["prior_top3"] = [["CHAIR", 0.5]]
+        f = B.fuse_multiview(self.pred("TANK", 0.2, "render"), entry, self.vocab)
+        self.assertEqual(f["id"], "LADDER") and self.assertLess(f["score"], 0.4)
+
+    def test_single_view_or_missing_multiview_changes_nothing(self):
+        p = self.pred("VALVE", 0.5)
+        self.assertEqual(B.fuse_multiview(p, {}, self.vocab), p)
+        self.assertEqual(B.fuse_multiview(p, dict(multiview=dict(id="PIPE", score=0.9, views=1)), self.vocab), p)
 
 
 def _load_saved():

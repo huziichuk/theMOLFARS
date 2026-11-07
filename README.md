@@ -16,7 +16,7 @@ We turn a raw 3D Gaussian Splatting scan of Valmet's Messukylä boiler/equipment
 
 | Brief criterion (weight) | What we deliver |
 |---|---|
-| Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video; Gemini vision refines them (49/50 on our benchmark). Touching parts of one thing are grouped (**49 multi-part objects from 129 fragments**), 88 boxes get a yaw-oriented frame, and any object can be **isolated** (only its splats shown) or downloaded as its own `.ply`. **Scan-to-BIM:** the whole semantic layer exports as **IFC4** (IfcPump, IfcValve, … with the Excel record as property sets; 0 schema errors in ifcopenshell) plus a 2D **floor plan and section A-A** (SVG). An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
+| Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video; Gemini vision refines them (49/50 on our benchmark). Touching parts of one thing are grouped (**49 multi-part objects from 129 fragments**), 88 boxes get a yaw-oriented frame, and any object can be **isolated** (only its splats shown) or downloaded as its own `.ply`. **Scan-to-BIM:** the whole semantic layer exports as **IFC4** (IfcPump, IfcValve, … with the Excel record as property sets; 0 schema errors in ifcopenshell) plus a 2D **floor plan and section A-A** (SVG). An optional **multi-view pass on a GPU PC** renders every box from 3-6 viewpoints with a PyTorch splat rasterizer and lets SigLIP 2 and a local VLM (Qwen3-VL) confirm or contest each label. |
 | Obstacle-aware navigation & proximity (25%) | Floor/obstacle occupancy grid from the splat, an A* route with clearance cost, live 1.3 m proximity radius, collision-checked first-person walk mode, and an **inspection tour** over all 13 non-healthy assets ranked by condition × criticality × uncertainty (Builder Question Q-04). |
 | AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`; confidence drops with data-quality flags and a weak 3D identity (Builder Question Q-06); one click drafts a work order (Q-05). The copilot **comments on every asset the avatar passes**, **checks every cited ID** against the retrieved evidence, and runs its own **telemetry anomaly detector** (AUC 0.91 against the pack's labels, Q-02). |
 | Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose, SQLite fallback) implementing every route of the pack's `API_Contract` sheet, live telemetry ingest + MQTT bridge (Q-07), OpenUSD export (Q-09), a static three.js + Spark viewer, `docker compose up` for everything, and CI on every push. |
@@ -79,25 +79,32 @@ In the chat and the asset card:
 - **Selecting an asset**: click a label or a proximity row. The card shows the 3D render and the matched real video photo, and you can ask the copilot about that asset.
 - **Card buttons**: ✨ Gemini Vision (object), 🔍 Inspect (copilot), 📝 Work-order draft, 🔎 Isolate (only that object's splats, to orbit around it; Esc returns) and ⬇ PLY (that object's splats as a standalone `.ply`).
 
-## Optional: multi-view labels on a GPU PC (`video_lift.py`)
+## Optional: multi-view labels on a GPU PC (`multiview_classify.py` + `vlm_classify.py`)
 
-This lifts 2D foundation models (CLIP ViT-L/14, OWLv2) to the 3D boxes using the walk-through video, as the brief's "multi-view vision models lifted to 3D" suggests. It needs an x64 PC with an NVIDIA GPU (tested target: i9-14th gen, RTX 4070 Laptop, 32 GB); it does not run on ARM laptops.
+This is the brief's "multi-view vision models lifted to 3D", done without camera registration: every 3D box is **rendered from 3-6 aisle viewpoints** by a small Gaussian-splat rasterizer in PyTorch (`pipeline/splat_render.py`, the same picture Spark draws in the browser), the sharp video tile is added where the browser's photo match found one, and two independent models vote: **SigLIP 2** zero-shot over the `vocab.json` prompts, and **Qwen3-VL-4B** (a local vision-language model) that sees all views with the box drawn on them, its size and height, and the SigLIP ranking as a hint. The result is merged into `web/vision_labels.json` as a second opinion (`entry["multiview"]`): agreement with the Gemini label **confirms** it (score 0.75), disagreement keeps the label but **caps the confidence and shows the alternative** in the tooltip (0.45 when SigLIP votes for the same alternative, 0.6 when only the VLM disagrees), and a weak single-view label is replaced. On this scan: **195 boxes confirmed, 97 contested by both models, 122 by the VLM alone**; no label was flipped, the benchmark stays 49/50. On the 50-crop benchmark the browser CLIP render alone gets 26/50, SigLIP 2 multi-view 31/50, the VLM 32/50, and every box where the VLM agreed with Gemini (31/50) was right, so agreement is a usable confidence.
 
-1. Clone the repo and put `boiler_room_360.mp4` and `builder_pack.xlsx` into `data/` (the `.ply` downloads itself).
-2. Create a venv with Python 3.11 or 3.12 and install CUDA PyTorch first (pick your CUDA version on [pytorch.org](https://pytorch.org/get-started/locally/)), then the rest:
+Needs an x64 PC with an NVIDIA GPU (tested: RTX 3080 Laptop 16 GB, Linux; ~25 min end to end). Models download from Hugging Face (~11 GB).
+
+1. Put `boiler_room_360.mp4` and `builder_pack.xlsx` into `data/` (the `.ply` downloads itself).
+2. Python 3.11/3.12 venv with CUDA PyTorch first (pick your CUDA on [pytorch.org](https://pytorch.org/get-started/locally/)), then the rest:
    ```bash
-   python -m venv .venv-gpu
-   .venv-gpu\Scripts\activate
-   pip install torch --index-url https://download.pytorch.org/whl/cu128
+   python -m venv .venv-gpu && source .venv-gpu/bin/activate      # Windows: .venv-gpu\Scripts\activate
+   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
    pip install -r requirements-gpu.txt
    ```
-3. Check the math without the GPU work, then run it (COLMAP SIFT runs on the CPU: a few minutes on an i9):
+3. Render, vote, merge, rebuild:
    ```bash
-   python pipeline/video_lift.py --selftest
-   python pipeline/video_lift.py data/boiler_room_360.mp4 web/scene.json data/equipment_room.ply work --fps 2
+   python pipeline/multiview_classify.py work/mv2 --render                 # zoomed views, ~10 min
+   python pipeline/multiview_classify.py work/mv --render --wide           # context views
+   python pipeline/multiview_classify.py work/mv2 --label --model google/siglip2-base-patch16-384
+   python pipeline/vlm_classify.py work/mv2 --wide work/mv --prior work/mv2/multiview_labels.json   # ~20 min
+   python pipeline/vlm_classify.py work/mv2 --apply web/vision_labels.json --prior work/mv2/multiview_labels.json
+   python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web   # re-fuses the finals into scene.json
    ```
-4. Open `work/align_check.ply` (grey = splat, red = COLMAP points) to see that the video lines up with the scan. If it does not, pass `--pairs pairs.json` with ≥ 4 hand-picked `{colmap:[x,y,z], world:[x,y,z]}` pairs.
-5. The result is `web/video_labels.json`. Commit it or copy it to the demo machine; the viewer picks it up on reload (multi-view labels win, new OWLv2 objects are drawn in cyan) and ignores it if the boxes changed (`scene_id`).
+   `--eval` on either script scores the models on `tests/vision_eval.json` first; `--sheets` saves the contact sheets the VLM saw.
+4. Commit `web/vision_labels.json` and `web/scene.json`; the viewer needs no GPU to show them.
+
+**`video_lift.py` (COLMAP + CLIP-L + OWLv2)** is the registration-based variant and is still there. On this walk-through video COLMAP splits the frames into several reconstructions and the automatic splat alignment fails (ICP fitness 0.06–0.10 at 2 and 4 fps), so it needs ≥ 4 hand-picked `--pairs` before its `web/video_labels.json` is usable; the viewer ignores that file for any other `scene_id`.
 
 ## Submission package (brief §07)
 
@@ -121,7 +128,10 @@ This lifts 2D foundation models (CLIP ViT-L/14, OWLv2) to the 3D boxes using the
 pipeline/
   build_scene.py      raw .ply -> clean splat, floor, nav grid, 3D boxes, Excel mapping, A* route -> web/scene.json
   extract_frames.py   walk-through video -> web/frames/*.jpg + index.json
-  video_lift.py       (GPU PC) COLMAP + CLIP-L + OWLv2 multi-view labels and new objects -> web/video_labels.json
+  splat_render.py     (GPU PC) Gaussian-splat rasterizer in PyTorch: renders any box from any viewpoint
+  multiview_classify.py (GPU PC) 3-6 views per box + video tile, SigLIP 2 / CLIP-L vote, benchmark
+  vlm_classify.py     (GPU PC) Qwen3-VL label per box from the views -> vision_labels.json["multiview"]
+  video_lift.py       (GPU PC) COLMAP + CLIP-L + OWLv2 registration-based variant -> web/video_labels.json
   gemini_vision.py    Gemini labels for every box from contact sheets of crops -> web/vision_labels.json
   fetch_data.py       downloads the splat from Google Drive when data/ has none
   export_usd.py       scene.json -> OpenUSD (.usda), also served at /api/scene/export.usda
@@ -157,7 +167,7 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 | Inspection tour (Q-04) | 13 stops, 57.2 m: 4 urgent (M-006, P-005, P-002, CV-003), 7 medium, 2 routine; all reachable |
 | Frames | 414 boxes = 49 multi-part objects (129 fragments) + 285 single ones; 88 yaw-oriented |
 | Telemetry detector (Q-02) | AUC 0.91 separating the 13 non-healthy from the 17 healthy assets, without using their labels |
-| Tests | 23 unit tests (6 need the Excel pack and skip in CI) |
+| Tests | 27 unit tests (6 need the Excel pack and skip in CI) |
 | Vision, CLIP only (B/16, prompt ensemble) | 302 / 414 boxes labelled ≥ 0.4 |
 | Vision, saved labels (CLIP + refinement rules + Gemini) | 401 boxes labelled by Gemini, 13 by rules; **49 / 50** on the benchmark (see the caveats in HOW_IT_WORKS §2.3) |
 | Vision benchmark (50 hand-labelled crops) | old setup 30% → **66%** correct; 74% precision on the labels actually shown |
@@ -166,7 +176,7 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 
 ## Known limits
 - **The Gemini path of the copilot needs `GEMINI_API_KEY`** and was not exercised while writing these docs. The offline evidence path is the fallback on any API error.
-- **`pipeline/video_lift.py` is untested end to end.** It was written for an x64 + CUDA machine; only its math self-test and syntax check ran on the ARM dev laptop.
+- **`pipeline/video_lift.py` runs end to end but its automatic alignment fails on this video** (see the GPU section); the committed multi-view labels come from `multiview_classify.py` + `vlm_classify.py`, which need no registration. The VLM's self-reported confidence is not calibrated (it says 0.9 for almost everything), so the fusion uses agreement between models, not that number.
 - **Boxes come from geometry.** Some are fragments of walls or pipes.
 - **The committed Gemini scores are inflated.** They were made when `gemini_vision.py` still stored at least 0.55, so every box shows a name. The script now stores Gemini's own score; re-run it (needs a key) to get honest scores and "Unidentified object" back. Part of `refine_vision` is coordinate rules for this room; they switch off automatically on any other scan (17 of 414 labels here depend on them).
 - **The Gemini vision endpoints write `scene.json` and `vision_labels.json` on the server.** Commit them only on purpose; a fresh `build_scene.py` run recomputes `scene.json` from the labels.

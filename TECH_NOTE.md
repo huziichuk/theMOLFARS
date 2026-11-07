@@ -27,4 +27,5 @@
 | Copilot retrieval | Deterministic relational retrieval, parameterised SQL via SQLAlchemy + psycopg 3, pandas | | `server.py` |
 | LLM | Google Gemini `gemini-3.5-flash-lite` via the `google-genai` SDK; offline evidence template without a key or on API errors | | `server.py` |
 | Server | FastAPI + uvicorn, static files via `StaticFiles`; config from `.env` (python-dotenv) | | `server.py` |
-| Optional multi-view lift | pycolmap (SfM), Open3D (FPFH, RANSAC, ICP with scaling), PyTorch CUDA, Hugging Face `transformers`: CLIP ViT-L/14, OWLv2 base-patch16-ensemble | x64 + NVIDIA GPU | `pipeline/video_lift.py` |
+| Multi-view labels (GPU PC) | Pure-PyTorch 3DGS rasterizer (`splat_render.py`); SigLIP 2 base/16-384 (+ CLIP L/14, SigLIP 2 so400m for the benchmark); Qwen3-VL-4B-Instruct bf16 via `transformers` 5.x; fusion in `build_scene.fuse_multiview` | x64 + NVIDIA GPU ≥ 12 GB | `pipeline/splat_render.py`, `multiview_classify.py`, `vlm_classify.py` |
+| Registration-based variant | pycolmap (SfM), Open3D (FPFH, RANSAC, ICP with scaling), PyTorch CUDA, Hugging Face `transformers`: CLIP ViT-L/14, OWLv2 base-patch16-ensemble | x64 + NVIDIA GPU | `pipeline/video_lift.py` |

@@ -211,9 +211,33 @@ Paths 2 and 3 update `vision_labels.json` **and** `scene.json` on the server, so
 
 ---
 
-## 3. Multi-view lift (GPU PC) — `pipeline/video_lift.py`
+## 3. Multi-view labels (GPU PC) — `splat_render.py`, `multiview_classify.py`, `vlm_classify.py`
 
-This is the "2D foundation models lifted to 3D" path recommended by the brief. It needs an x64 machine with CUDA.
+The brief asks for "multi-view vision models lifted to 3D". Registering the video to the scan (3b) proved fragile, so the committed multi-view labels come from **views rendered from the scan itself**, which need no registration and are available for every box.
+
+1. **Rasterizer (`splat_render.py`).** A 3D-Gaussian-splat renderer in pure PyTorch, ~150 lines: every Gaussian's 3D covariance (quaternion, scales) is projected to a 2D ellipse with the usual Jacobian, Gaussians are sorted front to back and alpha-composited per pixel with a segmented cumulative transmittance (one `argsort` over all (Gaussian, pixel) pairs, no CUDA extension). SH degree 0 colour only. A 320² view of the 1.2 M-Gaussian room takes 0.2–0.5 s on an RTX 3080 Laptop.
+2. **Viewpoints (`multiview_classify.py --render`).** For each box: the nearest walkable cell gives the aisle direction; cameras at that azimuth and ±45°, ±90° (kept only when they are ≤ 0.55 m from a walkable cell, i.e. not inside a wall) plus one from above. The field of view is chosen so the box with 80 % context fills the frame (22°–64°), the same framing as the browser crops the benchmark was labelled on. Views with < 50 % splat coverage or no contrast are dropped. A second render with a fixed 64° (`--wide`) gives context views. 414 boxes → 1,971 zoomed views (2–6 each).
+3. **Zero-shot vote (`--eval`, `--label`).** CLIP ViT-L/14 and SigLIP 2 (base, so400m) score every view against the `vocab.json` prompt ensemble; probabilities are averaged over the views, the video tile (where the browser's CSLS match ≥ 0.025, 60 boxes) counts double. On `tests/vision_eval.json`:
+
+   | Model | nearest-aisle view only | all views | + video tile |
+   |---|---|---|---|
+   | CLIP L/14 | 19/50 | 25/50 | 25/50 |
+   | **SigLIP 2 base/16-384** | 28/50 | **31/50** | 28/50 |
+   | SigLIP 2 so400m/14-384 | 24/50 | 28/50 | 27/50 |
+
+   (Browser CLIP B/16 render alone: 26/50. Before the adaptive zoom the same models scored 20–28: with a 5 cm box in a 64° view they classify the room, not the object.)
+4. **VLM label (`vlm_classify.py`).** Qwen3-VL-4B-Instruct (bf16, 9 GB) gets one contact sheet per box: 2 wide views + up to 4 zoomed views with the projected 3D box drawn in yellow, the video tile, the box size, height above the floor and colour, the SigLIP top-3 as a hint, and the class list. The prompt tells it that a box is often a *part* of a bigger object, that bare surfaces and unrecognisable blur are STRUCTURE, and asks for JSON. 3 s per box. Benchmark: **32/50**; a first prompt without wide views and the "part of" rule got 18/50 (it called every small patch a vibration sensor). The remaining errors are mostly label ambiguities (a cart standing in front of the washing machine, a gauge on a valve, a strip of a tank's side).
+5. **Fusion (`build_scene.fuse_multiview`).** The VLM label goes into `vision_labels.json` as `entry["multiview"]` with the SigLIP top-3, and `refine_vision` treats it as an independent second opinion after the single-view rules:
+   - agrees with the Gemini label (or with the rule result) → **confirmed**, score = max(score, 0.75), source `…+multiview`;
+   - disagrees with a shown label → the label stays, the score is **capped** and the alternative is appended to the reason and stored as `alt` (visible in the tooltip and the asset card): 0.45 when SigLIP's top-1 is the same alternative (two independent models against one), 0.6 when the VLM is alone, because it is weak on small parts (it calls many pumps, valves and gauges "pipe"; PUMP 0/2 on the benchmark);
+   - the single-view label was below `min_score` → the VLM label takes over, shown (0.6) only when SigLIP's top-1 agrees, otherwise kept as a 0.38 guess.
+   On the benchmark the VLM agreed with Gemini on 31/50 boxes and all 31 were correct, so agreement is a real confidence signal; the VLM's own confidence (0.9 for nearly everything) is not used. The benchmark stays 49/50 after fusion because labels are never flipped, only confirmed or contested. Over the 414 boxes: 195 confirmed, 97 contested by both models (mostly STRUCTURE↔PIPE/TANK on wall patches), 122 by the VLM alone.
+
+   Side effect on the Excel mapping (1.5): `asset_fit_score` adds the vision score, so the changed confidences re-rank the candidate boxes. Two rules were added at the same time: a box may carry an asset only when its vision class has an `asset_class` (pump, motor, valve, gauge, sensor; a tank or cabinet box never gets a pump), and boxes farther than 1.5 m from a walkable cell are penalised so that every degraded asset lands where the Q-04 tour can reach it (13 stops, none skipped).
+
+### 3b. Registration-based variant — `pipeline/video_lift.py`
+
+The COLMAP path from the earlier design, kept for scans where the video registers well. It needs an x64 machine with CUDA.
 
 1. **SfM:** ffmpeg samples frames at 2 fps. Then pycolmap runs SIFT features → sequential matching → incremental mapping, which gives camera poses and a sparse point cloud.
 2. **Alignment COLMAP → splat world:**
@@ -232,7 +256,7 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
    - Detections that don't overlap an existing box by more than 30% are added.
 5. **Output:** `web/video_labels.json` (`scene_id`, `labels` per object id, `extra_objects`, `world_from_colmap`). The viewer picks it up automatically, but ignores it (with a console warning) if its `scene_id` differs from the current `scene.json`. Multi-view labels take priority, and the new objects are drawn in cyan.
 
-`python pipeline/video_lift.py --selftest` checks the Umeyama fit and the projection math without a GPU.
+`python pipeline/video_lift.py --selftest` checks the Umeyama fit and the projection math without a GPU. **Status on this video:** at 2 fps COLMAP registers 101 of 224 frames in the largest of 4 reconstructions, at 4 fps 207 of 447; the automatic FPFH/RANSAC/ICP alignment to the splat reaches a fitness of only 0.10 / 0.06 (red points off the walls in `align_check.ply`), so the labels it produced were discarded. It needs hand-picked `--pairs` here.
 
 ---
 
