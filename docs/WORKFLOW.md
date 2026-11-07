@@ -43,25 +43,33 @@ sequenceDiagram
    - run `python pipeline/video_lift.py --selftest`;
    - run `python pipeline/video_lift.py data/boiler_room_360.mp4 web/scene.json data/equipment_room.ply work --fps 2`;
    - copy `web/video_labels.json` to the demo machine and reload the viewer.
-8. **Optional:** put `GEMINI_API_KEY=…` in `.env` (git-ignored) and restart `server.py` to turn on LLM answers to free-form questions.
+8. **Optional:** put `GEMINI_API_KEY=…` in `.env` (git-ignored) and restart `server.py` to turn on LLM answers to free-form questions and the Gemini vision buttons.
+9. **Optional, with the key:** `python pipeline/gemini_vision.py` labels every box with Gemini (`--only-missing` for new boxes only), then re-run step 2 so the Excel mapping follows the new labels.
 
 ### Re-running after changes
 - Changing the splat, the Excel file or a pipeline parameter needs only step 2 again. Then do a hard reload in the browser.
 - Caches never outlive their input. Vision labels and `video_labels.json` are tied to `scene_id` (a hash of the box geometry, so a re-map with `--vision` keeps them valid), and the video tile embeddings to a hash of the source video. After a rebuild, re-run **AI labels** and, if you use it, `video_lift.py`.
 - Tunable constants:
   - pipeline: top of `build_scene.py` (`VOXEL`, `COLOR_TOL`, `MIN_PTS`, `CELL`, `ROBOT_R`, `HEAD`);
-  - vision: `model`, `min_score`, `proto_weight`, classes and prompts in `web/vocab.json`;
+  - vision: `model`, `min_score`, `proto_weight`, classes and prompts in `web/vocab.json`; refinement rules in `refine_vision` (`build_scene.py`);
   - viewer: `RADIUS`, `MAX_LABELS`, `SIM_MIN` in `index.html`.
 
 ## 2. Verification we ran
-- Unit tests: `python -m unittest discover tests` (sanitize: clean file, garbage tail, mid-file bad block; `PostgresBackend` checks the evidence context for ASSET-017 and needs the seeded database running).
+- Unit tests: `python -m unittest discover tests`:
+  - sanitize: clean file, garbage tail, mid-file bad block;
+  - saved outputs (`SavedVisionLabels`): labels match the scene, ≥ 75% on the benchmark, every object has vision fields, all 30 assets sit on equipment. No Gemini wording is asserted, so re-running `gemini_vision.py` keeps them green;
+  - `PostgresBackend`: the evidence context for ASSET-017, the object context, and that a `text/plain` POST gets 415 (the CSRF guard); needs the server deps and the seeded database.
+- Server smoke test with a fake Gemini client (on 0d19530 + fixes): 3 parallel Gemini requests finish in 0.7 s instead of queueing, and all 3 labels are saved; oversized and non-base64 bodies get 400; a non-numeric `score` is clamped.
+- A rebuild from the committed `vision_labels.json` reproduces every box's class and the target (OBJ-048); 11 assets swap tags within their class.
+- `AssetMapping` test: the worst-health asset goes to the box that fits and never to a box vision calls a wall (it fails if walls are allowed).
+- Security checks on a copy of `web/`: `text/plain` POSTs to all 4 endpoints get 415 and the labels stay intact; a planted `<img onerror>` label shows as text in the viewer and does not run.
 - Vision benchmark: 50 hand-labelled render crops (`tests/vision_eval.json`) × 3 models × 6 variants. See HOW_IT_WORKS §2.1.
 - The pipeline asserts that the route exists and stays on walkable cells, and that a target box can be found.
 - `video_lift.py --selftest` checks the Umeyama similarity fit and the projection math.
 - Copilot retrieval ran for all 30 assets plus an unknown ID (KeyError → 404) on the earlier stdlib/pandas server; the PostgreSQL retrieval keeps the same queries and output shape.
 - In the browser we checked the full mission (walk, arrive, diagnosis), the collision in Walk mode, the label cap, the vision pass, the CSLS match pairs (inspected visually) and that the cached results come back after a reload.
 - **Not verified:**
-  - the Gemini path of the copilot while writing these docs (needs `GEMINI_API_KEY`);
+  - the real Gemini API (copilot and vision) on this machine: `google-genai` needs `cryptography`, which has no Windows-on-ARM wheel for Python 3.14;
   - `video_lift.py` end to end (it needs an x64 + CUDA machine);
   - non-Chromium browsers.
 
@@ -88,6 +96,9 @@ sequenceDiagram
 | Vision labels wrong on obvious things (green chair → "motor", washing machine → "valve") | Only 30% correct on 50 hand-labelled crops; the old vocabulary had no class for those objects, and below the threshold the shape guess was shown | 14-class vocabulary incl. clutter, 4-template prompt ensemble, CLIP B/16 (66%), "Unidentified object" below 0.4 (74% precision), labels saved server-side and fed back into Excel mapping. |
 | Combine with the team's ml branch (Open3D: RANSAC walls, DBSCAN, yaw boxes, size-based Excel mapping) | Same CLIP pass on both box sets. ml raw: 435 boxes, 110 read as equipment, but 67 overlapping pairs; after NMS 370 boxes / 90 equipment (main: 414 / 99). The sets complement each other (33 equipment only in ml), but adding ml's non-overlapping boxes to ours gave +6 equipment and +58 wall/clutter boxes. A NumPy port of the RANSAC wall removal found no real walls in our splat points (best planes held ~2% of points, random slices). ml's size-based mapping put 15/30 assets on clutter. | Kept main's segmentation and vision-based mapping; `--boxes` stays opt-in (`inputs/ml_segment/`) to re-run the comparison as the ml branch evolves. |
 | In-browser LLM copilot without a key (SmolLM2-1.7B-Instruct, transformers.js on WebGPU) | q4f16 produced garbage on this Windows-on-ARM GPU even for one-line prompts; q4 worked but took 35–96 s per answer with a ~900-token evidence context; in 3 test questions it cited 0 evidence IDs, invented hydraulic details, and gave a wrong seal-inspection date (evidence: [WO-00260], 2026-05-15). The 360M model only copied report lines | Not shipped: free-form questions need the server-side LLM (`server.py`); the arrival report stays the deterministic, fully cited template. |
+| Vision still wrong on many boxes after CLIP (26/50 render-only on the benchmark) | Gemini sees the same crops and names everyday items correctly | `gemini_vision.py` (batch) and two live Gemini buttons; `refine_vision` geometry rules; 49/50 on the benchmark. The committed scores still carry a 0.55 floor (removed from the script; re-run to fix), and part of the rules are room-specific: see HOW_IT_WORKS §2.3. |
+| Gemini endpoints froze the server and could lose labels | The blocking SDK call ran on the event loop; files were read before the call and written after | Call in a worker thread and re-read the files right before the write; 5 MB body limit; scores clamped. |
+| Audit (ponytail): any website could overwrite labels on the local server and inject HTML through them | A cross-site `text/plain` POST got 200 and left 1 of 414 labels; an `<img onerror>` label was rendered as HTML | JSON-only POSTs (415 otherwise), labels escaped in the viewer, Postgres bound to localhost, splat revalidated instead of re-downloaded, Gemini score floor removed, room-specific rules gated by `scene_id`, one shared room note and class rule, copilot body and history capped, an asset-mapping test. |
 | Clicking a 3D label showed no vision data | The click handler captured the raw scene object | The handler is bound to the live object. |
 | `pandas` 3 rejected `agg("first")` | The server crashed during retrieval | Compute first/last/min/max/mean explicitly per series. |
 | Pointer Lock refused in the embedded browser | `SecurityError` | WASD/arrow walking works without pointer lock; mouse-look is optional. |

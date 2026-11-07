@@ -11,6 +11,8 @@ flowchart LR
     BS --> CP[web/boiler_room_clean.ply]
     MP4[Walk-through video .mp4] --> EF[extract_frames.py] --> FR[web/frames/*.jpg]
     MP4 -. GPU PC .-> VL[video_lift.py<br/>COLMAP + CLIP-L + OWLv2] -.-> VJ[web/video_labels.json]
+    FR --> GV[gemini_vision.py<br/>contact sheets -> Gemini] --> VLJ[web/vision_labels.json]
+    VLJ --> BS
   end
   subgraph Server["server.py (FastAPI)"]
     XLSX --> SEED[seed_db.py] --> PG[(PostgreSQL 16<br/>14 tables)]
@@ -27,11 +29,13 @@ flowchart LR
     V --> MIS[Mission: A* walk, proximity radius]
     MIS -- arrival --> API[POST /api/copilot]
     VIS --> V
+    V -- buttons --> GAPI[POST /api/vision/gemini*]
   end
   API --> RAG
+  GAPI --> CL
 ```
 
-The heavy, deterministic work runs offline in about 5 s. It turns the raw splat into a semantic layer (`scene.json`). The browser renders the splat with the semantic layer on top and runs the mission. It can also run a vision model locally. The server stays thin: static files plus one copilot endpoint.
+The heavy, deterministic work runs offline in about 5 s. It turns the raw splat into a semantic layer (`scene.json`). The browser renders the splat with the semantic layer on top and runs the mission. It can also run a vision model locally. The server stays thin: static files, the copilot endpoint, and the Gemini vision endpoints that save labels.
 
 ---
 
@@ -44,7 +48,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 - The header is parsed and the body is read as an `N × P` float32 matrix (`np.frombuffer`, zero-copy).
 - **Sanity mask:** a row is valid if all its values are finite, |xyz| < 50, and log-scales are in (−20, 3).
 - **Corrupted-tail detection.** The whole rest of the file is cut from the first invalid row only if fewer than 50% of the rows after it are valid **and** the file's last 1,000 rows are mostly invalid. A bad block in the middle of an otherwise good file loses only its own rows. `tests/test_build_scene.py` covers a clean file, a garbage tail and a mid-file bad block. The original starter file (`Industrial Boiler Room.ply`) is valid only up to vertex 502,483. After that it holds noise (entropy 7.92 bits/byte, no float structure). Splats are stored in octree order, so the missing part is a whole region of the room.
-- The cleaned splat is written back with the same header and an updated vertex count.
+- **Slim splat for the viewer.** Only splats that cover surfaces (`max scale > 3 cm` and opacity ≥ 0.08) or are clearly visible (opacity ≥ 0.20) are kept, and the view-dependent colour (`f_rest_*`, 45 of 59 properties) is dropped. That gives 621,845 of 1,676,481 splats and 35 MB instead of 396 MB. Colours no longer change with the viewing angle. The full splat is still used for the grid, the boxes and the vision renders.
 
 ### 1.2 World frame, floor, ceiling
 - The capture is y-down (COLMAP convention). World = rotate 180° about X: `(x, −y, −z)`. The viewer does the same with `mesh.rotation.x = π`.
@@ -72,11 +76,23 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
    - saturated red on the floor → *storage bin* (never mapped to an asset);
    - tall and thin → *vertical pipe*; long and flat → *horizontal pipe*;
    - small and high → *valve positioner / instrument*; small and low → *local measurement*;
+   - very small (< 18 cm) and 0.3–1.3 m above the floor → *vibration / temperature sensor*;
    - low and compact → *motor/drive*; large → *tank/cabinet*.
+8. **Vision refinement (`refine_vision`, with `--vision` or when `<outdir>/vision_labels.json` exists).** For each box the render and photo labels are merged (photo wins on agreement, or when CSLS ≥ 0.03 and it is ≥ 0.12 more confident). Then about 30 geometry rules correct it:
+   - generic physical rules, e.g. a cart can't float more than 0.35 m above the floor, a pump can't be taller than 1.05 m, a thin tubular shape is a pipe, a saturated-red pipe-mounted box is a pump;
+   - **rules tied to this scan's coordinates**, e.g. "x > 3.7, z > 2.3, ~0.5 m tall → pump (east-wall manifold)" or "x > 3.5, −1.5 < z < 0.2 → ladder". These encode what we saw in this room, so they run **only when the box geometry is this scan's** (`scene_id` 9dd32119e0b1, `ROOM_RULES_SCENE`); on any other scan they switch off. Here they decide 17 of 414 labels.
+   - A Gemini label for the same class keeps its specific name and reason.
+
+   The refined label is written back into `vision_labels.json` (atomically; the log says so).
 
 ### 1.5 Excel mapping
 - `Asset_Master` is joined with `Current_State`. The **worst health score becomes the mission target** (ASSET-017, P-005, process pump, fouling, health 44).
-- The mapping is procedural and class-compatible, which the brief explicitly allows. With a fixed seed, each object takes a free asset of the same class first, then of a compatible class (pump ↔ motor; valve ↔ transmitter ↔ vibration sensor). Leftover assets go to the remaining non-pipe, non-storage objects.
+- The mapping is procedural, which the brief explicitly allows. Assets are placed **worst health first**, each on the free box with the best `asset_fit_score`:
+  - +4 for the exact class, +1.5 for a compatible one (pump ↔ motor; valve ↔ transmitter ↔ vibration sensor), +2 if vision saw it, plus the vision score;
+  - a size check per class (e.g. a pump box 0.20–0.85 m, a transmitter 0.08–0.30 m);
+  - boxes vision reads as wall, pipe, duct, lamp, box, chair, ladder, cart or appliance are never used, and thin flakes (< 4 cm) or slabs (> 1.05 m) are pushed to the end.
+
+  Assets of the same class are interchangeable to this score, so a rebuild can swap tags between boxes of one class (we saw 11 swaps); the classes and the target stay the same.
 - **Target placement:** the target asset is moved onto a reachable object of exactly its class (≤ 1.3 m from an aisle, because pumps are wall-mounted). If none exists, a compatible class is used (≤ 1.0 m), then any equipment box (≤ 2.0 m). If even that is empty, the pipeline stops with a clear message. Among the candidates it picks one far from the start, but not the very edge of the scan. If no box received the target asset during mapping, the box gets the full Master + Current_State record, so health and status are always present.
 
 ### 1.6 Route
@@ -91,10 +107,12 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
   "splat": "boiler_room_clean.ply", "frame": "rotate_x_180",
   "floor_y": -1.17, "ceiling_y": 0.87,
   "grid": { "origin": [x0, z0], "cell": 0.1, "w": 97, "h": 83, "walkable": "0101…" }, // row-major by z
-  "objects": [{ "id": "OBJ-182", "cls": "PROCESS_PUMP", "label": "Circulation pump (red, pipe-mounted)",
+  "objects": [{ "id": "OBJ-048", "cls": "PROCESS_PUMP", "label": "Circulation / centrifugal pump",
+                "shape_label": "…",               // the geometry guess before vision
+                "vision_id": "PUMP", "vision_score": 0.58, "vision_source": "gemini-3.5-flash-lite", "reason": "…",
                 "center": [x, y, z], "size": [sx, sy, sz], "color": [r, g, b],
                 "asset": { "asset_id": "ASSET-017", "tag": "P-005", "condition_state": "…", "health_score": 44, … } | null }],
-  "target_object": "OBJ-182", "target_asset": "ASSET-017",
+  "target_object": "OBJ-048", "target_asset": "ASSET-017",
   "path": [[x, y, z], …],
   "scene_id": "9dd32119e0b1"   // SHA-1 of the box geometry; object IDs are valid only for these boxes
 }
@@ -121,9 +139,9 @@ Pressing **AI labels (CLIP)**:
    - The camera is placed on the side of the nearest aisle cell (the view a technician gets), ≥ 0.8 m away because splats blur up close.
    - The main loop is paused. The view is rendered for 3 frames so Spark can re-sort the splats for the new viewpoint.
    - The projected box is cropped as a square with 80% context and scaled to 224².
-3. **Classifies against `web/vocab.json`,** which `video_lift.py` also reads. It has 14 classes:
-   - equipment: pump, motor, valve, gauge, cabinet, tank;
-   - infrastructure: pipe;
+3. **Classifies against `web/vocab.json`,** which `video_lift.py` also reads. It has 17 classes (14 at the time of the benchmark below; sensor, heat exchanger and duct were added later):
+   - equipment: pump, motor, valve, gauge, vibration sensor, heat exchanger, cabinet, tank;
+   - infrastructure: pipe, duct;
    - clutter: washing machine, chair, ladder, box, cart, lamp, wall/floor.
 
    Each class has 2–5 prompts. Its text embedding is the mean over all prompts × 4 templates (a *prompt ensemble*).
@@ -160,6 +178,23 @@ CLIP struggles on blurry splat renders, while the video shows the same equipment
 5. The asset card shows the render next to the matched real photo, cropped directly from the frame JPEG with CSS (no canvas needed).
 
 The photo match reuses the tile embeddings, so no frame is decoded twice. Results are saved on the server (see 2.1). `scene_id` is a fingerprint of the box geometry, so it changes only when the boxes change. Labels from an older run are never applied to renumbered boxes.
+
+### 2.3 Gemini vision
+CLIP labels are the free, local baseline. With `GEMINI_API_KEY` there are three Gemini paths, all with `gemini-3.5-flash-lite` and the 17-class vocabulary from `vocab.json`. The prompt tells the model the room also holds everyday items (washing machine, boxes, ladder, chairs, carts).
+1. **Batch, offline — `python pipeline/gemini_vision.py [--only-missing] [--classes PUMP,VALVE]`.**
+   - Each box gets one 192 px crop: the matched video tile if CSLS ≥ 0.025, otherwise a CPU splat render from the nearest aisle.
+   - 24 crops go on one labelled contact sheet; 4 sheets run in parallel. Each crop is sent with its box size, height above the floor, colour and the current label as a prior.
+   - **The class is kept from the prior when the prior score is ≥ 0.40**; Gemini then only supplies the name and reason. The prior is the CLIP or rule label, never an earlier Gemini answer, so a re-run can still change Gemini's own classes (on the committed labels: 303 boxes keep their CLIP class, 111 are open to Gemini). The stored score is Gemini's own score for its class, or the prior's score when the prior class is kept. (The committed labels were made with an older floor of 0.55, see below.)
+   - This was run for the committed labels: 401 of 414 boxes carry a Gemini label, the other 13 a refinement rule.
+2. **One object — button *Gemini Vision (object)* in an object's chat card → `POST /api/vision/gemini`.** It sends the live render crop plus the matched video tile.
+3. **The current view — button *Gemini scan view* → `POST /api/vision/gemini-scene`.** It sends the screenshot plus up to 30 projected candidate boxes; Gemini returns up to 14 detections, each matched to an object ID or null.
+
+Paths 2 and 3 update `vision_labels.json` **and** `scene.json` on the server, so the next viewer sees the new labels at once.
+
+**What the numbers mean.** On the 50-crop benchmark the saved labels are now **49/50** correct (CLIP render alone: 26/50 for the same files). Caveats:
+- the committed labels were made with a score floor of 0.55 (since removed), which puts every Gemini label above `min_score`, so "Unidentified object" doesn't appear until `gemini_vision.py` is re-run;
+- part of the gain comes from the scene-specific rules in 1.4 step 8 and from keeping the prior class, and we can't separate the two shares;
+- the benchmark crops were known while the rules were written, so 49/50 is an upper bound for this room, not a generalisation result.
 
 ---
 
@@ -203,7 +238,10 @@ This is the "2D foundation models lifted to 3D" path recommended by the brief. I
 | GET | `/api/assets` | all assets with their current state |
 | GET | `/api/assets/{asset_id}` | the full evidence context for one asset (JSON); 404 if unknown |
 | POST | `/api/vision` | `{scene_id, model, labels}` → writes `web/vision_labels.json` (scene_id must match `scene.json`, IDs `ABC-123`, ≤ 5 MB, atomic write) |
-| POST | `/api/copilot` | `{asset_id, question?, history?}` → `{mode, answer}` |
+| POST | `/api/vision/gemini` | `{object_id, render_b64?, photo?}` → `{object_id, result}`; needs a key (503 without), 502 on a Gemini error |
+| POST | `/api/vision/gemini-scene` | `{view_b64, candidates?}` → `{detections, updated}` |
+| POST | `/api/copilot` | `{asset_id \| object_id, question?, history?}` → `{mode, answer}`. `object_id` is for boxes with no Excel asset: Gemini gets the vision label, size, height and the 4 nearest registered assets |
+| GET | `/health` | `{status: "ok"}` |
 
 ### Retrieval (deterministic and relational)
 There are only 30 assets, so we use no vector store. For the asset ID the server runs parameterised SQL queries and collects:
@@ -225,5 +263,12 @@ The result is about 11 k characters of JSON, and every row keeps its evidence ID
   - It ends with all data-quality flags.
 
 ### Hardening
-- Request bodies are parsed defensively; `asset_id` is required. Questions are cut to 2,000 characters, and only the last 10 user/assistant messages are passed through.
+- **Every POST must be `Content-Type: application/json`, otherwise 415.** Any website open in the same browser could otherwise send a `text/plain` POST to `localhost:8000` (CSRF) and overwrite the labels or spend the Gemini quota; a JSON POST from another site needs a CORS preflight, which this server never approves.
+- Request bodies are parsed defensively; `asset_id` or `object_id` is required. Questions are cut to 2,000 characters, and only the last 10 user/assistant messages, each cut to 4,000 characters, are passed through.
 - An unknown asset returns 404 or 400 instead of an exception.
+- Every POST body is limited to 5 MB. Images must be valid base64 data URLs. Gemini's `score` is clamped to 0–1 (a non-number becomes 0.85), and unknown or non-string object IDs are dropped.
+- **Gemini calls run in a worker thread** (`asyncio.to_thread`), so a slow answer doesn't freeze the server. The label files are re-read and written in one step after the answer arrives, so parallel scans can't overwrite each other's labels.
+- HTML, JSON and PLY are served with `Cache-Control: no-cache`: the browser revalidates every time, so changed labels arrive at once, while an unchanged splat comes back as a 304 instead of being downloaded again.
+- The viewer inserts object names as text (`esc()`), never as HTML, because they come from label files and Gemini.
+- PostgreSQL listens on `127.0.0.1` only (`docker-compose.yml`), because the default password is in the repo.
+- One room description (`room_note` in `vocab.json`) is shared by every Gemini prompt, and one rule (`mapping_class` in `build_scene.py`) turns a vision label into the mapping class for both the pipeline and the server.

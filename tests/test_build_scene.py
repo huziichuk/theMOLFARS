@@ -33,6 +33,33 @@ class Sanitize(unittest.TestCase):
         self.assertEqual(len(B.sanitize(r, P)), 3400)
 
 
+class AssetMapping(unittest.TestCase):
+    def test_worst_asset_goes_to_the_box_that_fits_never_to_a_wall(self):
+        import tempfile
+
+        import pandas as pd
+
+        def box(size, cls, vision_id, seen=True):
+            s = np.array(size, float)
+            return dict(bmin=-s / 2, bmax=s / 2, cls=cls, vision_id=vision_id, vision_score=0.6, seen=seen)
+
+        wall = box([0.5, 0.5, 0.05], "PROCESS_PUMP", "STRUCTURE")  # pump-sized, but vision says it is a wall
+        pump = box([0.4, 0.35, 0.3], "PROCESS_PUMP", "PUMP")
+        slab = box([1.5, 1.2, 0.6], "TANK", "TANK")
+        with tempfile.TemporaryDirectory() as d:
+            xlsx = Path(d) / "pack.xlsx"
+            with pd.ExcelWriter(xlsx) as w:
+                pd.DataFrame([{"asset_id": "A-1", "tag": "P-1", "asset_class": "PROCESS_PUMP"},
+                              {"asset_id": "A-2", "tag": "P-2", "asset_class": "PROCESS_PUMP"}]).to_excel(w, sheet_name="Asset_Master", index=False)
+                pd.DataFrame([{"asset_id": "A-1", "health_score": 40, "condition_state": "critical", "issue_code": "X", "urgency": "high"},
+                              {"asset_id": "A-2", "health_score": 90, "condition_state": "ok", "issue_code": "", "urgency": "low"}]
+                             ).to_excel(w, sheet_name="Current_State", index=False)
+            target = B.map_assets([wall, pump, slab], xlsx, np.random.default_rng(0))
+        self.assertEqual(target["asset_id"], "A-1")
+        self.assertEqual(pump["asset"]["asset_id"], "A-1")  # worst health gets the box that fits
+        self.assertNotIn("asset", wall)
+
+
 class PostgresBackend(unittest.TestCase):
     def test_asset_context_from_postgres(self):
         sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -46,32 +73,72 @@ class PostgresBackend(unittest.TestCase):
         self.assertTrue(len(ctx["alarms"]) > 0)
         self.assertTrue(len(ctx["maintenance"]) > 0)
 
-    def test_vision_eval_benchmark_and_label_sync(self):
-        import json
+    def test_cross_site_text_plain_post_is_refused(self):
+        # a text/plain POST needs no CORS preflight, so any website could send it to localhost (CSRF)
+        import asyncio
 
-        root = Path(__file__).parents[1]
-        gt = json.loads((root / "tests" / "vision_eval.json").read_text())["labels"]
-        vl = json.loads((root / "web" / "vision_labels.json").read_text())["labels"]
-        sc = json.loads((root / "web" / "scene.json").read_text())
-        self.assertEqual(len(sc["objects"]), 414)
-        correct = sum(1 for oid, truth in gt.items() if vl[oid]["final"]["id"] == truth)
-        self.assertGreaterEqual(correct / len(gt), 0.75)
-        obj0 = sc["objects"][0]
-        self.assertEqual(obj0["cls"], "TANK")
-        self.assertEqual(obj0["vision_source"], "gemini-3.5-flash-lite")
-        self.assertTrue(len(obj0.get("reason", "")) > 10)
-        self.assertEqual(obj0["shape_label"], "Tank / cabinet")
-        obj2 = next(o for o in sc["objects"] if o["id"] == "OBJ-002")
-        self.assertEqual(obj2["vision_id"], "APPLIANCE")
-        self.assertIn("washing machine", obj2["label"].lower())
+        from starlette.requests import Request
 
-        sys.path.insert(0, str(root))
+        sys.path.insert(0, str(Path(__file__).parents[1]))
         import server  # noqa: E402
 
-        sctx = server.object_scene_context("OBJ-000")
-        self.assertIsNotNone(sctx)
-        self.assertEqual(sctx["object_id"], "OBJ-000")
-        self.assertEqual(sctx["specific_label"], "Diaphragm expansion vessel")
+        self.addCleanup(server.engine.dispose)
+
+        async def call(ctype):
+            req = Request({"type": "http", "method": "POST", "path": "/api/vision", "headers": [(b"content-type", ctype)]})
+
+            async def passed(_):
+                return "passed"
+
+            return await server.json_posts_only(req, passed)
+
+        self.assertEqual(asyncio.run(call(b"text/plain")).status_code, 415)
+        self.assertEqual(asyncio.run(call(b"application/json")), "passed")
+
+    def test_object_scene_context_matches_scene(self):
+        sys.path.insert(0, str(Path(__file__).parents[1]))
+        import server  # noqa: E402
+
+        self.addCleanup(server.engine.dispose)
+        obj = SAVED["scene"]["objects"][0]
+        sctx = server.object_scene_context(obj["id"])
+        self.assertEqual(sctx["object_id"], obj["id"])
+        self.assertEqual(sctx["dimensions_m"]["height_y"], obj["size"][1])
+
+
+def _load_saved():
+    import json
+
+    root = Path(__file__).parents[1]
+    return dict(
+        gt=json.loads((root / "tests" / "vision_eval.json").read_text())["labels"],
+        labels=json.loads((root / "web" / "vision_labels.json").read_text()),
+        scene=json.loads((root / "web" / "scene.json").read_text()),
+    )
+
+
+SAVED = _load_saved()
+
+
+class SavedVisionLabels(unittest.TestCase):
+    """Checks the committed web/ outputs; no Gemini text is asserted, so re-running gemini_vision.py keeps this green."""
+
+    def test_labels_belong_to_current_scene(self):
+        self.assertEqual(SAVED["labels"]["scene_id"], SAVED["scene"]["scene_id"])
+
+    def test_benchmark_on_hand_labelled_crops(self):
+        vl = SAVED["labels"]["labels"]
+        correct = sum(1 for oid, truth in SAVED["gt"].items() if (vl.get(oid, {}).get("final") or {}).get("id") == truth)
+        self.assertGreaterEqual(correct / len(SAVED["gt"]), 0.75)
+
+    def test_every_object_has_vision_fields_and_target_is_equipment(self):
+        objs = SAVED["scene"]["objects"]
+        for o in objs:
+            for k in ("vision_id", "vision_score", "vision_source", "shape_label"):
+                self.assertIn(k, o, o["id"])
+        mapped = [o for o in objs if o.get("asset")]
+        self.assertEqual(len(mapped), 30)
+        self.assertTrue(all(o["vision_id"] in ("PUMP", "MOTOR", "VALVE", "GAUGE", "SENSOR") for o in mapped))
 
 
 if __name__ == "__main__":

@@ -108,7 +108,12 @@ def get_best_crop(obj, entry, frames_dir, frame_files, w, rgb, op, sc, walk_pts,
     return render_object_crop(w, rgb, op, sc, walk_pts, obj, W=tile_size, H=tile_size), "splat_3d"
 
 
-def classify_batch(client, batch_idx, batch_items, vocab_classes, floor_y):
+def non_gemini_prior(entry):
+    """CLIP / rule label to anchor Gemini. A previous Gemini answer is never the prior: re-runs must be able to change it."""
+    return next((p for p in ((entry or {}).get("final"), (entry or {}).get("render")) if p and p.get("source") != MODEL), {})
+
+
+def classify_batch(client, batch_idx, batch_items, vocab_classes, floor_y, room_note):
     tile = 192
     cols = 6
     rows_n = (len(batch_items) + cols - 1) // cols
@@ -125,7 +130,7 @@ def classify_batch(client, batch_idx, batch_items, vocab_classes, floor_y):
 
         s = obj["size"]
         base_h = round(float(obj["center"][1] - s[1] / 2 - floor_y), 2)
-        prior = (entry or {}).get("final") or (entry or {}).get("render") or {}
+        prior = non_gemini_prior(entry)
         p_id = prior.get("id", obj["cls"])
         vc_map = {c["id"]: c["name"] for c in vocab_classes}
         meta_rows.append({
@@ -153,7 +158,7 @@ def classify_batch(client, batch_idx, batch_items, vocab_classes, floor_y):
         "Attached is a grid of object crops from this room (each tile is labeled with its `object_id`, e.g. OBJ-000), "
         "along with each object's 3D bounding-box size `[W, H, D]` in meters, elevation above floor, RGB color, and `geometry_vision_prior`.\n\n"
         "IMPORTANT CONTEXT:\n"
-        "1. This room contains BOTH industrial boiler-room equipment (expansion tanks, boilers, circulation pumps, electric motors, control valves, pressure gauges, sensors, electrical cabinets, insulated pipes, ventilation ducts) AND ordinary everyday / utility items actually kept in the room (a washing machine / dryer, cardboard boxes, plastic storage bins, an aluminium stepladder, chairs/stools, wheeled carts, ceiling lamps, walls/doors).\n"
+        f"1. {room_note}\n"
         "2. Name every object honestly according to what it actually is: e.g., if `id` is `APPLIANCE`, label it `'Washing machine'` or `'Front-loading washing machine'`; if `BOX`, label it `'Cardboard storage box'` or `'Plastic storage bin'`; if `LADDER`, `'Aluminium step ladder'`; if `CHAIR`, `'Office chair'` or `'Work stool'`; if `CART`, `'Wheeled utility cart'` or `'Pallet jack'`; and for industrial equipment use accurate technical names (`'Diaphragm expansion vessel'`, `'Inline circulation pump'`, `'Motorized control valve'`, etc.).\n"
         "3. When `geometry_vision_prior.score >= 0.40`, keep `id` equal to `geometry_vision_prior.id` and write a specific, natural `label` (2-5 words) and `reason` matching that class and crop.\n"
         "4. For EVERY object, provide:\n"
@@ -190,6 +195,9 @@ def classify_batch(client, batch_idx, batch_items, vocab_classes, floor_y):
 
 
 def main():
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")  # same names as server.py
+    if not api_key:
+        sys.exit("Set GEMINI_API_KEY (or GOOGLE_API_KEY) in .env first")
     scene_path = ROOT / "web" / "scene.json"
     vl_path = ROOT / "web" / "vision_labels.json"
     vocab_path = ROOT / "web" / "vocab.json"
@@ -235,12 +243,12 @@ def main():
 
     batch_size = 24
     batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = genai.Client(api_key=api_key)
 
     results = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
         futs = {
-            pool.submit(classify_batch, client, idx, b, vocab["classes"], scene["floor_y"]): idx
+            pool.submit(classify_batch, client, idx, b, vocab["classes"], scene["floor_y"], vocab["room_note"]): idx
             for idx, b in enumerate(batches)
         }
         for fut in as_completed(futs):
@@ -254,7 +262,7 @@ def main():
     for o in objs:
         oid = o["id"]
         entry = vl["labels"].setdefault(oid, {})
-        prior = entry.get("final") or entry.get("render") or {}
+        prior = non_gemini_prior(entry)
         gem = results.get(oid)
         if not gem:
             continue
@@ -273,7 +281,13 @@ def main():
         gem_label = str(gem.get("label") or vc["name"]).strip()
         if final_id != cid:
             gem_label = vc["name"]
-        score = round(max(float(gem.get("score", 0.78)), prior_sc, 0.55), 3)
+        try:
+            gem_sc = min(1.0, max(0.0, float(gem.get("score", 0.5))))
+        except (TypeError, ValueError):
+            gem_sc = 0.5
+        # Gemini's score is about its own class; when the prior class is kept, the prior's score is the honest one.
+        # No floor: below vocab min_score the viewer must still say "Unidentified object".
+        score = round(gem_sc if final_id == cid else prior_sc, 3)
         reason = str(gem.get("reason") or f"{vc['name']} in industrial boiler room").strip()
         res_obj = {
             "id": vc["id"],
@@ -290,7 +304,9 @@ def main():
         updated += 1
 
     vl["model"] = f"{vl.get('model', 'Xenova/clip-vit-base-patch16')} + {MODEL}"
-    vl_path.write_text(json.dumps(vl))
+    tmp = vl_path.with_suffix(".tmp")  # a crash mid-write must not destroy the only copy of the labels
+    tmp.write_text(json.dumps(vl))
+    tmp.replace(vl_path)
     print(f"[gemini] updated {updated}/{len(objs)} objects in {vl_path}")
 
 

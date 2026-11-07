@@ -8,13 +8,15 @@
 | Pipeline | Python ≥ 3.11, NumPy, SciPy (`ndimage`, `sparse.csgraph`), pandas + openpyxl, Pillow | | `pipeline/build_scene.py` |
 | Segmentation | Colour-aware 26-neighbour voxel graph + connected components + 3D NMS; geometric/colour classifier | no learned model | `build_scene.py` |
 | Navigation | 10 cm occupancy grid, morphology, obstacle inflation, EDT clearance, 8-connected A*, line-of-sight smoothing | | `build_scene.py` |
-| Frames | ffmpeg | 9.x | `pipeline/extract_frames.py` |
+| Frames | ffmpeg on PATH, or the binary from `imageio-ffmpeg` | 9.x | `pipeline/extract_frames.py` |
 | Viewer | three.js | 0.180.0 (CDN import map) | `web/index.html` |
 | Splat renderer | Spark (`@sparkjsdev/spark`) | 2.4.0 | `web/index.html` |
 | In-browser vision | transformers.js (`@huggingface/transformers`) on WebGPU, WASM fallback | 4.3.2 | `web/index.html` |
-| Vision model | CLIP ViT-B/16 (`Xenova/clip-vit-base-patch16`): vision + text towers, fp16 on WebGPU, q8 fallback; 14 classes × prompt ensemble (4 templates); picked on a 50-crop benchmark (B/32, B/16, L/14 tried) | ONNX | browser |
+| Vision model | CLIP ViT-B/16 (`Xenova/clip-vit-base-patch16`): vision + text towers, fp16 on WebGPU, q8 fallback; 17 classes × prompt ensemble (4 templates); picked on a 50-crop benchmark (B/32, B/16, L/14 tried) | ONNX | browser |
 | Visual prototypes | 129 hand-labelled tiles from the walk-through video | | `web/prototype_tiles.json` |
 | Photo matching | CLIP tile embeddings + CSLS hubness-corrected nearest neighbour; Cache API | | browser |
+| Gemini vision | `gemini-3.5-flash-lite` multimodal: batch contact sheets (`gemini_vision.py`), one object and current view (`/api/vision/gemini*`); JSON output constrained to the `vocab.json` classes | needs `GEMINI_API_KEY` | `pipeline/gemini_vision.py`, `server.py` |
+| Label refinement | `refine_vision`: render/photo fusion + geometry and room-specific rules; `asset_fit_score` for the Excel mapping | | `build_scene.py` |
 | Data store | PostgreSQL 16 (Docker Compose), seeded from the Excel pack by `seed_db.py` (14 tables, indexed) | `postgres:16-alpine` | `docker-compose.yml`, `seed_db.py` |
 | Copilot retrieval | Deterministic relational retrieval, parameterised SQL via SQLAlchemy + psycopg 3, pandas | | `server.py` |
 | LLM | Google Gemini `gemini-3.5-flash-lite` via the `google-genai` SDK; offline evidence template without a key or on API errors | | `server.py` |

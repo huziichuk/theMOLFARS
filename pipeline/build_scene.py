@@ -210,13 +210,22 @@ def classify(o, floor):
 NOT_ASSETS = ("PIPE", "STORAGE", "CLUTTER")  # boxes that never carry an Excel asset
 
 
+def mapping_class(label):
+    """Vision label -> box class used by the Excel mapping (server.py uses the same rule)."""
+    return "CLUTTER" if label["kind"] == "clutter" else (label["asset_class"] or label["id"])  # e.g. PROCESS_PUMP, TANK
+
+
 def geometry_id(objs):
     """Fingerprint of the boxes only: object IDs stay valid while it is unchanged, even if the Excel mapping changes."""
     geo = [[round(float(x), 3) for x in (*(o["bmin"] + o["bmax"]) / 2, *(o["bmax"] - o["bmin"]))] for o in objs]
     return hashlib.sha1(json.dumps(geo).encode()).hexdigest()[:12]
 
 
-def refine_vision(o, entry, floor, vocab_by_id):
+# Rules that test room coordinates (pos[0], pos[2]) were written by looking at this one scan of Equipment Room.ply.
+ROOM_RULES_SCENE = "9dd32119e0b1"
+
+
+def refine_vision(o, entry, floor, vocab_by_id, room_rules=False):
     """Fuse 3D bounding-box geometry, BIM/spatial layout priors, and splat color with CLIP/Gemini predictions."""
     if not entry:
         return None
@@ -240,7 +249,8 @@ def refine_vision(o, entry, floor, vocab_by_id):
         pred["asset_class"] = vc["asset_class"]
 
     s = o["bmax"] - o["bmin"]
-    pos = (o["bmin"] + o["bmax"]) / 2
+    # On any other scan pos is NaN: every comparison with NaN is False, so all coordinate rules switch off at once
+    pos = (o["bmin"] + o["bmax"]) / 2 if room_rules else np.full(3, np.nan)
     col = o["color"]
     foot, h = float(max(s[0], s[2])), float(s[1])
     thin = float(min(s[0], s[2]))
@@ -391,7 +401,7 @@ def apply_vision(objs, path, geo_id, floor=0.0, base_geo_id=None):
     for i, o in enumerate(objs):
         oid = f"OBJ-{i:03d}"
         entry = v["labels"].get(oid)
-        f = refine_vision(o, entry, floor, vocab_by_id)
+        f = refine_vision(o, entry, floor, vocab_by_id, room_rules=(base_geo_id or geo_id) == ROOM_RULES_SCENE)
         if entry is not None and f is not None:
             if entry.get("gemini") and entry["gemini"].get("id") != f.get("id"):
                 entry.pop("gemini", None)
@@ -400,7 +410,7 @@ def apply_vision(objs, path, geo_id, floor=0.0, base_geo_id=None):
                 entry["final"] = f
                 changed = True
         if f and f.get("score", 0) >= min_score:
-            o["cls"] = "CLUTTER" if f["kind"] == "clutter" else (f["asset_class"] or f["id"])  # e.g. PROCESS_PUMP, TANK
+            o["cls"] = mapping_class(f)
             o["label"] = f["label"]
             o["reason"] = f.get("reason", "")
             o["vision_source"] = f.get("source", "vision")
@@ -408,9 +418,12 @@ def apply_vision(objs, path, geo_id, floor=0.0, base_geo_id=None):
             o["vision_score"] = f.get("score", 0.5)
             o["seen"] = True
             n += 1
-    if changed:
+    if changed:  # refined finals (and a re-keyed scene_id after --boxes) go back into the labels file
         v["scene_id"] = geo_id
-        p.write_text(json.dumps(v))
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(v))
+        tmp.replace(p)
+        print(f"[vision] updated {path} in place")
     return n
 
 
@@ -570,6 +583,7 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     geo_id = geometry_id(objs)
     if vision is None and (out / "vision_labels.json").exists():
         vision = str(out / "vision_labels.json")
+        print(f"[vision] using {vision} (found in outdir; delete it or build into another dir for shape-only classes)")
     if vision:
         print(f"[vision] {apply_vision(objs, vision, geo_id, floor=floor, base_geo_id=base_geo_id)} boxes take their class from {vision}")
     rng = np.random.default_rng(7)
@@ -709,7 +723,7 @@ def save_floorplan(path, g, objs, cells, ti):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("ply"); ap.add_argument("xlsx"); ap.add_argument("outdir")
-    ap.add_argument("--vision", help="web/vision_labels.json from the browser vision pass")
+    ap.add_argument("--vision", help="vision_labels.json (default: <outdir>/vision_labels.json if present)")
     ap.add_argument("--boxes", help="folder with objects.json + transform.json from the ml branch: their boxes are added")
     a = ap.parse_args()
     main(a.ply, a.xlsx, a.outdir, a.vision, a.boxes)

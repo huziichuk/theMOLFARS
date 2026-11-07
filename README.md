@@ -8,13 +8,13 @@ We turn a raw 3D Gaussian Splatting scan of Valmet's Messukylä boiler/equipment
 2. **Excel mapping.** The synthetic Excel asset pack is mapped onto those objects.
 3. **Navigation.** A service avatar walks a collision-free A* route to the faulty device, highlighting assets within a proximity radius as it goes.
 4. **Diagnosis.** On arrival, a grounded AI copilot diagnoses the fault, citing exact evidence IDs.
-5. **Vision.** A client-side CLIP model, helped by the real walk-through video, relabels what each box actually is.
+5. **Vision.** A client-side CLIP model, helped by the real walk-through video, relabels what each box actually is. Optionally, Google Gemini names each object (batch script or live buttons).
 
 ![floor plan: walkable aisles (green), obstacles (red), 3D boxes (blue), target (red box), A* route (yellow)](web/floorplan.png)
 
 | Brief criterion (weight) | What we deliver |
 |---|---|
-| Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video. An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
+| Semantic extraction & 3D framing (30%) | Colour-aware voxel-graph segmentation gives **414 boxes** with NMS (no overlaps). CLIP vision labels run in the browser and are improved by matching to the real video; Gemini vision refines them (49/50 on our benchmark). An optional multi-view lift (COLMAP + CLIP-L + OWLv2) runs on a GPU PC. |
 | Obstacle-aware navigation & proximity (25%) | Floor/obstacle occupancy grid from the splat, an A* route with clearance cost, live 1.3 m proximity radius, and collision-checked first-person walk mode. |
 | AI diagnostics, grounding (20%) | Deterministic relational retrieval from PostgreSQL (seeded from the Excel pack) feeds Google Gemini (`gemini-3.5-flash-lite`) or an offline evidence report. Every claim cites `[EVT-…] [WO-…] [CASE-…] [DOC-…] [DQ-…]`. |
 | Backend architecture (15%) | A modular Python pipeline (`pipeline/`), a FastAPI server over PostgreSQL (Docker Compose), and a static three.js + Spark viewer. |
@@ -44,7 +44,11 @@ python seed_db.py                                                               
 python server.py                                                                     # FastAPI on http://localhost:8000
 # in the viewer: press "AI labels (CLIP)" once; then optionally map Excel by what vision saw:
 python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web --vision web/vision_labels.json
+# optional, needs GEMINI_API_KEY: Gemini names every box, then rebuild so the mapping uses it
+python pipeline/gemini_vision.py && python pipeline/build_scene.py data/equipment_room.ply data/builder_pack.xlsx web
 ```
+
+`build_scene.py` uses `<outdir>/vision_labels.json` automatically when it exists (the log says so), and writes refined labels back into it.
 
 Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) to get LLM answers. Without it the copilot returns a fully cited, templated evidence report. `DATABASE_URL` overrides the default `postgresql+psycopg://molfars:molfars@localhost:5432/molfars`.
 
@@ -53,6 +57,7 @@ Optional: put `GEMINI_API_KEY=…` in `.env` (git-ignored, read by `server.py`) 
 - **Follow / Orbit / Walk (WASD, arrows)**: Walk mode collides with the nav grid.
 - **All frames**: shows every 3D box. Otherwise only boxes inside the proximity radius are shown, with labels on the 6 nearest.
 - **AI labels (CLIP)**: runs the in-browser vision pass, ~5 min the first time, cached after that.
+- **Gemini scan view** / **Gemini Vision (object)**: asks Gemini about the current view or one object and saves the label on the server (needs `GEMINI_API_KEY`).
 - **Selecting an asset**: click a label or a proximity row. The card shows the 3D render and the matched real video photo, and you can ask the copilot about that asset.
 - **Open splat…**: views any `.ply/.spz/.splat` file.
 
@@ -68,7 +73,8 @@ pipeline/
   build_scene.py      raw .ply -> clean splat, floor, nav grid, 3D boxes, Excel mapping, A* route -> web/scene.json
   extract_frames.py   walk-through video -> web/frames/*.jpg + index.json
   video_lift.py       (GPU PC) COLMAP + CLIP-L + OWLv2 multi-view labels and new objects -> web/video_labels.json
-server.py             FastAPI: serves web/ + asset / vision / copilot API over PostgreSQL
+  gemini_vision.py    Gemini labels for every box from contact sheets of crops -> web/vision_labels.json
+server.py             FastAPI: serves web/ + asset / vision / Gemini vision / copilot API over PostgreSQL
 seed_db.py            loads the Excel pack into PostgreSQL (14 sheets -> tables + indexes)
 docker-compose.yml    PostgreSQL 16 for the server
 web/
@@ -88,20 +94,22 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 
 | Area | Result |
 |---|---|
-| Splats | 1,676,481, all valid |
+| Splats | 1,676,481, all valid; the viewer gets 621,845 surface splats without view-dependent colour (35 MB instead of 396 MB) |
 | Room height | floor y −1.17, ceiling y 0.87 (2.04 scan units) |
 | Nav grid | 97×83 cells of 10 cm; 1,431 walkable |
 | Segmentation | 414 framed objects |
-| Excel mapping | all 30 assets mapped; target ASSET-017 / P-005 sits on a box vision labels as a pump |
-| Route | 7.7 m, 14 waypoints |
-| Vision (CLIP B/16, 14 classes, prompt ensemble) | **302 / 414** boxes confidently labelled (≥ 0.4); the rest read "Unidentified object" |
+| Excel mapping | all 30 assets on boxes vision reads as pump / motor / valve / gauge / sensor, placed by a size-and-class fit score; target ASSET-017 / P-005 on OBJ-048 (a pump) |
+| Route | 9.3 m, 32 waypoints |
+| Vision, CLIP only (B/16, prompt ensemble) | 302 / 414 boxes labelled ≥ 0.4 |
+| Vision, saved labels (CLIP + refinement rules + Gemini) | 401 boxes labelled by Gemini, 13 by rules; **49 / 50** on the benchmark (see the caveats in HOW_IT_WORKS §2.3) |
 | Vision benchmark (50 hand-labelled crops) | old setup 30% → **66%** correct; 74% precision on the labels actually shown |
-| Excel mapping after `--vision` | all 30 assets on boxes vision sees as pumps / valves / gauges / motors (before: 11 on walls, 4 on boxes) |
 | Copilot | offline evidence report verified for all 30 assets on the earlier stdlib server; the FastAPI + PostgreSQL version is covered by `tests` (`PostgresBackend`, needs a seeded database) |
 
 ## Known limits
 - **The Gemini path of the copilot needs `GEMINI_API_KEY`** and was not exercised while writing these docs. The offline evidence path is the fallback on any API error.
 - **`pipeline/video_lift.py` is untested end to end.** It was written for an x64 + CUDA machine; only its math self-test and syntax check ran on the ARM dev laptop.
-- **Boxes come from geometry.** Some are fragments of walls or pipes. Boxes with vision confidence below 0.4 read "Unidentified object".
+- **Boxes come from geometry.** Some are fragments of walls or pipes.
+- **The committed Gemini scores are inflated.** They were made when `gemini_vision.py` still stored at least 0.55, so every box shows a name. The script now stores Gemini's own score; re-run it (needs a key) to get honest scores and "Unidentified object" back. Part of `refine_vision` is coordinate rules for this room; they switch off automatically on any other scan (17 of 414 labels here depend on them).
+- **The Gemini vision endpoints write `scene.json` and `vision_labels.json` on the server.** Commit them only on purpose; a fresh `build_scene.py` run recomputes `scene.json` from the labels.
 - **The original starter `Industrial Boiler Room.ply` is two-thirds corrupted.** It is random bytes after vertex 502,483, so half the room is missing. Use `Equipment Room.ply`; the pipeline detects and trims the broken file.
 - **The splat is served unconverted (~395 MB).** Converting it to `.spz` would load much faster.

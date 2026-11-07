@@ -3,6 +3,7 @@
   "model": "Xenova/clip-vit-base-patch16",
   "templates": ["a photo of a {}.", "a photo of a {} in an industrial boiler room.", "a blurry photo of a {}.", "a low quality 3D render of a {}."],
   "min_score": 0.4,
+  "room_note": "This room contains BOTH industrial boiler-room equipment (expansion tanks, boilers, circulation pumps, electric motors, control valves, pressure gauges, vibration sensors, electrical cabinets, insulated pipes, ventilation ducts) AND ordinary everyday items kept in the room (a washing machine / dryer, cardboard boxes, plastic storage bins, an aluminium stepladder, chairs/stools, wheeled carts, ceiling lamps, walls/doors).",
   "proto_weight": 0.25,
   "classes": [
     {"id": "PUMP", "name": "Circulation / centrifugal pump", "kind": "equipment", "asset_class": "PROCESS_PUMP",

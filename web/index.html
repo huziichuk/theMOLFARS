@@ -192,6 +192,8 @@ ring.rotation.x = -Math.PI / 2; ring.position.y = 0.03; avatar.add(ring);
 avatar.position.copy(pts[0]).setY(floorY);
 scene.add(avatar);
 
+// labels come from vision_labels.json / Gemini, so they are text, never markup
+const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 $("#mission").innerHTML = `Target <b style="color:var(--bad)">${target.asset.tag} [${target.asset.asset_id}]</b> — ${target.asset.asset_class}, ${target.asset.issue_code ?? ""} · health ${target.asset.health_score}<br>
 ${S.objects.length} framed objects · ${S.objects.filter((o) => o.asset).length} mapped to Excel · route ${S.path.length} waypoints`;
 
@@ -342,8 +344,8 @@ function proximity() {
   lastNear = key;
   $("#nearby").innerHTML = near.map(([d, o]) => {
     const tagChip = o.asset ? (o === target ? "FAULT" : o.asset.condition_state) : (o.ai?.id ?? o.vision_id ?? o.cls ?? "SCENE");
-    return `<li data-id="${o.id}"><span>${o.asset ? `<b>${o.asset.tag}</b> ` : `<code style="font-size:11px;color:var(--mute)">${o.id}</code> `}${nameOf(o)}</span>
-    <span><span class="chip ${o.cls}">${tagChip}</span> ${d.toFixed(1)}</span></li>`;
+    return `<li data-id="${o.id}"><span>${o.asset ? `<b>${o.asset.tag}</b> ` : `<code style="font-size:11px;color:var(--mute)">${o.id}</code> `}${esc(nameOf(o))}</span>
+    <span><span class="chip ${esc(o.cls)}">${esc(tagChip)}</span> ${d.toFixed(1)}</span></li>`;
   }).join("")
     || `<li style="color:var(--mute)">No assets within ${RADIUS} m</li>`;
   $("#nearby").querySelectorAll("li[data-id]").forEach((li) => li.onclick = () => select(objs.find((o) => o.id === li.dataset.id)));
@@ -351,7 +353,7 @@ function proximity() {
 
 // ---------- copilot & Gemini Vision inspector (works for both Excel and non-Excel industrial objects)
 let selected = target, history = [];
-const md = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])
+const md = (t) => esc(t)
   .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/(^|\s)_(.+?)_(?=\s|$)/g, "$1<i>$2</i>")
   .replace(/\[((?:ASSET|EVT|WO|CASE|DOC|DQ|OBJ)-[^\]]+)\]/g, '<span class="cite">[$1]</span>').replace(/\n/g, "<br>");
 function say(role, text) {
@@ -461,7 +463,7 @@ async function geminiScanScene(btn) {
         const b = document.createElement("div");
         b.className = "gbox";
         b.style.cssText = `top:${ymin / 10}%;left:${xmin / 10}%;height:${Math.max(3, (ymax - ymin) / 10)}%;width:${Math.max(3, (xmax - xmin) / 10)}%`;
-        b.innerHTML = `<span>${d.object_id ? `${d.object_id} · ` : ""}${d.label} (${Math.round(d.score * 100)}%)</span>`;
+        b.innerHTML = `<span>${d.object_id ? `${d.object_id} · ` : ""}${esc(d.label)} (${Math.round(d.score * 100)}%)</span>`;
         b.title = d.reason || d.label;
         b.onclick = () => { overlay.innerHTML = ""; if (d.object_id) { const o = objs.find((x) => x.id === d.object_id); if (o) select(o); } };
         overlay.appendChild(b);
