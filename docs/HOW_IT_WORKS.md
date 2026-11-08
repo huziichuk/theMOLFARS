@@ -105,7 +105,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 ### 1.6a Inspection tour (Builder Question Q-04)
 - **Priority** = `(1 − health/100) × criticality weight (A 1.0, B 0.75, C 0.5) × (1 + (1 − model_confidence))`: damage times importance, and an uncertain diagnosis is worth checking sooner. The same function ranks `/api/priorities`.
 - **Order:** urgency level first (high → medium → routine, from `Current_State`), then inside each level the nearest next stop by real A* path length (greedy).
-- Every non-healthy asset whose box is within 1.5 m of the floor is a stop; the rest are listed as unreachable. Result: 13 stops, 57.2 m, saved as `tour` in `scene.json` with each stop's path index.
+- Every non-healthy asset whose box is within 1.5 m of the floor is a stop; the rest are listed as unreachable. Result: 13 stops, 56.8 m, none skipped, saved as `tour` in `scene.json` with each stop's path index.
 
 ### 1.6b Frames: groups and orientation (display layer)
 - **Groups:** boxes of one vision class without an Excel asset that touch (≤ 3 cm) are union-found into one multi-part object (`GRP-…`): 49 groups from 129 fragments (pipe runs, shelves, walls). The viewer draws one frame per group.
@@ -205,7 +205,7 @@ CLIP labels are the free, local baseline. With `GEMINI_API_KEY` there are three 
 Paths 2 and 3 update `vision_labels.json` **and** `scene.json` on the server, so the next viewer sees the new labels at once.
 
 **What the numbers mean.** On the 50-crop benchmark the saved labels are now **49/50** correct (CLIP render alone: 26/50 for the same files). Caveats:
-- the committed labels were made with a score floor of 0.55 (since removed), which puts every Gemini label above `min_score`, so "Unidentified object" doesn't appear until `gemini_vision.py` is re-run;
+- the committed labels were made with a score floor of 0.55 (since removed), which puts every Gemini label above `min_score`, so "Unidentified object" doesn't appear until `gemini_vision.py` is re-run; the multi-view pass (§3) now confirms 195 of them and caps the other 219;
 - part of the gain comes from the scene-specific rules in 1.4 step 8 and from keeping the prior class, and we can't separate the two shares;
 - the benchmark crops were known while the rules were written, so 49/50 is an upper bound for this room, not a generalisation result.
 
@@ -229,7 +229,7 @@ The brief asks for "multi-view vision models lifted to 3D". Registering the vide
 4. **VLM label (`vlm_classify.py`).** Qwen3-VL-4B-Instruct (bf16, 9 GB) gets one contact sheet per box: 2 wide views + up to 4 zoomed views with the projected 3D box drawn in yellow, the video tile, the box size, height above the floor and colour, the SigLIP top-3 as a hint, and the class list. The prompt tells it that a box is often a *part* of a bigger object, that bare surfaces and unrecognisable blur are STRUCTURE, and asks for JSON. 3 s per box. Benchmark: **32/50**; a first prompt without wide views and the "part of" rule got 18/50 (it called every small patch a vibration sensor). The remaining errors are mostly label ambiguities (a cart standing in front of the washing machine, a gauge on a valve, a strip of a tank's side).
 5. **Fusion (`build_scene.fuse_multiview`).** The VLM label goes into `vision_labels.json` as `entry["multiview"]` with the SigLIP top-3, and `refine_vision` treats it as an independent second opinion after the single-view rules:
    - agrees with the Gemini label (or with the rule result) → **confirmed**, score = max(score, 0.75), source `…+multiview`;
-   - disagrees with a shown label → the label stays, the score is **capped** and the alternative is appended to the reason and stored as `alt` (visible in the tooltip and the asset card): 0.45 when SigLIP's top-1 is the same alternative (two independent models against one), 0.6 when the VLM is alone, because it is weak on small parts (it calls many pumps, valves and gauges "pipe"; PUMP 0/2 on the benchmark);
+   - disagrees with a shown label → the label stays, the score is **capped** and the alternative is appended to the reason (that is what the tooltip and the asset card show) and stored as `alt` in `vision_labels.json` (not copied into `scene.json`): 0.45 when SigLIP's top-1 is the same alternative (two independent models against one), 0.6 when the VLM is alone, because it is weak on small parts (it calls many pumps, valves and gauges "pipe"; PUMP 0/2 on the benchmark);
    - the single-view label was below `min_score` → the VLM label takes over, shown (0.6) only when SigLIP's top-1 agrees, otherwise kept as a 0.38 guess.
    On the benchmark the VLM agreed with Gemini on 31/50 boxes and all 31 were correct, so agreement is a real confidence signal; the VLM's own confidence (0.9 for nearly everything) is not used. The benchmark stays 49/50 after fusion because labels are never flipped, only confirmed or contested. Over the 414 boxes: 195 confirmed, 97 contested by both models (mostly STRUCTURE↔PIPE/TANK on wall patches), 122 by the VLM alone.
 
