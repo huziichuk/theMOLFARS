@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,42 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://molfars:molfars@lo
 MODEL = "gemini-3.5-flash-lite"
 MAX_BODY = 5_000_000
 ROOM_NOTE = json.loads((ROOT / "web" / "vocab.json").read_text())["room_note"]  # one description of the room for every Gemini prompt
+
+# Public hosting (PUBLIC_DEMO=1): nothing can be written, and Gemini answers are rate-limited so a public link
+# cannot run up the key's bill; over the limit the copilot answers with the offline evidence report.
+PUBLIC = os.environ.get("PUBLIC_DEMO") == "1"
+GEMINI_PER_IP_HOUR = int(os.environ.get("GEMINI_PER_IP_HOUR", "20"))
+GEMINI_PER_DAY = int(os.environ.get("GEMINI_PER_DAY", "300"))
+WRITE_PATHS = {"/api/vision", "/api/vision/gemini", "/api/vision/gemini-scene", "/api/telemetry"}
+# shortcut: in-memory counters, exact only with one server instance (the Cloud Run deploy sets --max-instances 1);
+# move them to Redis/Firestore before scaling out
+_gemini_ip: dict[str, list[float]] = {}
+_gemini_day = [0, 0]  # [day number, calls that day]
+
+
+def gemini_allowed(ip: str, now: float | None = None) -> bool:
+    """Count one Gemini call for this client; False when the client's hourly or the server's daily limit is used up."""
+    if not PUBLIC:
+        return True
+    now = time.time() if now is None else now
+    day = int(now // 86400)
+    if _gemini_day[0] != day:
+        _gemini_day[:] = [day, 0]
+        _gemini_ip.clear()
+    recent = [t for t in _gemini_ip.get(ip, []) if now - t < 3600]
+    if len(recent) >= GEMINI_PER_IP_HOUR or _gemini_day[1] >= GEMINI_PER_DAY:
+        _gemini_ip[ip] = recent
+        return False
+    _gemini_ip[ip] = recent + [now]
+    _gemini_day[1] += 1
+    return True
+
+
+def client_ip(request: Request) -> str:
+    # behind Cloud Run the client is the first X-Forwarded-For entry; it can be spoofed, which only moves a caller
+    # to another hourly bucket: the daily cap still bounds the cost
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() or (request.client.host if request.client else "?")
 
 
 
@@ -873,14 +910,16 @@ async def copilot(request: Request):
         except KeyError:
             return JSONResponse(status_code=400, content={"error": "unknown asset"})
         client = gemini_client()
-        if client:
+        limited = bool(client) and not gemini_allowed(client_ip(request))
+        if client and not limited:
             try:
                 answer = await asyncio.to_thread(ask_gemini, client, ctx, history, question)
                 return {"mode": MODEL, "answer": answer, "citations": check_citations(answer, ctx)}
             except Exception as e:
                 print("[copilot] LLM unavailable:", type(e).__name__, e)
         answer = offline_report(ctx, question)
-        return {"mode": "offline-evidence", "answer": answer, "citations": check_citations(answer, ctx)}
+        mode = "offline-evidence (Gemini limit reached, try again later)" if limited else "offline-evidence"
+        return {"mode": mode, "answer": answer, "citations": check_citations(answer, ctx)}
 
     if req.get("object_id"):
         try:
@@ -888,7 +927,7 @@ async def copilot(request: Request):
         except KeyError:
             return JSONResponse(status_code=400, content={"error": "unknown object"})
         client = gemini_client()
-        if client:
+        if client and gemini_allowed(client_ip(request)):
             try:
                 return {"mode": f"{MODEL} (scene-vision)", "answer": await asyncio.to_thread(ask_gemini_scene_object, client, octx, history, question)}
             except Exception as e:
@@ -911,12 +950,20 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/config")
+def config():
+    """What the viewer may offer: the public demo hides the buttons that write labels."""
+    return {"public": PUBLIC, "gemini": bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))}
+
+
 @app.middleware("http")
 async def json_posts_only(request: Request, call_next):
     """Any website can send a text/plain POST to localhost without asking (CSRF); application/json forces a CORS
     preflight, which this server never approves, so only our own page can call the API."""
     if request.method == "POST" and not request.headers.get("content-type", "").startswith("application/json"):
         return JSONResponse(status_code=415, content={"error": "Content-Type must be application/json"})
+    if PUBLIC and request.method == "POST" and request.url.path in WRITE_PATHS:
+        return JSONResponse(status_code=403, content={"error": "read-only public demo: run it locally to change labels or data"})
     return await call_next(request)
 
 

@@ -79,6 +79,19 @@ In the chat and the asset card:
 - **Selecting an asset**: click a label or a proximity row. The card shows the 3D render and the matched real video photo, and you can ask the copilot about that asset.
 - **Card buttons**: ✨ Gemini Vision (object), 🔍 Inspect (copilot), 📝 Work-order draft, 🔎 Isolate (only that object's splats, to orbit around it; Esc returns) and ⬇ PLY (that object's splats as a standalone `.ply`).
 
+## Public demo on Google Cloud Run
+
+`deploy/cloudrun.sh` puts the demo online as one container, with no database server (SQLite from the Excel pack) and no download at start (the built scene and the Excel pack go into the image).
+
+1. Install the [gcloud CLI](https://cloud.google.com/sdk/docs/install), run `gcloud auth login`, and have a project with billing on (the free tier covers a demo; €9 of credit is plenty).
+2. Get a Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+3. From the repo root, with the scene built (Quick start): `bash deploy/cloudrun.sh <project-id>` (region `europe-north1` by default). It asks for the key once and stores it in Secret Manager; the key is never in the image, the repo or the logs. The script prints the public URL.
+
+What the public mode (`PUBLIC_DEMO=1`) changes:
+- **Read-only.** `POST /api/vision`, `/api/vision/gemini`, `/api/vision/gemini-scene` and `/api/telemetry` answer 403, and the viewer hides the AI buttons that rewrite labels. The copilot, work-order drafts, navigation, isolation and every export work as locally.
+- **Gemini limits.** At most `GEMINI_PER_IP_HOUR` (20) answers per visitor per hour and `GEMINI_PER_DAY` (300) for the whole service; past that the copilot answers with the cited offline evidence report and says the limit was reached. The service runs on one instance (`--max-instances 1`), which keeps the counters exact and the bill bounded; it scales to zero when idle.
+- Set a [budget alert](https://console.cloud.google.com/billing/budgets) on the billing account as a second guard.
+
 ## Optional: multi-view labels on a GPU PC (`multiview_classify.py` + `vlm_classify.py`)
 
 This is the brief's "multi-view vision models lifted to 3D", done without camera registration: every 3D box is **rendered from 3-6 aisle viewpoints** by a small Gaussian-splat rasterizer in PyTorch (`pipeline/splat_render.py`, the same picture Spark draws in the browser), the sharp video tile is added where the browser's photo match found one, and two independent models vote: **SigLIP 2** zero-shot over the `vocab.json` prompts, and **Qwen3-VL-4B** (a local vision-language model) that sees all views with the box drawn on them, its size and height, and the SigLIP ranking as a hint. The result is merged into `web/vision_labels.json` as a second opinion (`entry["multiview"]`): agreement with the Gemini label **confirms** it (score 0.75), disagreement keeps the label but **caps the confidence and shows the alternative** in the tooltip (0.45 when SigLIP votes for the same alternative, 0.6 when only the VLM disagrees), and a weak single-view label is replaced. On this scan: **195 boxes confirmed, 97 contested by both models, 122 by the VLM alone**; no label was flipped, the benchmark stays 49/50. On the 50-crop benchmark the browser CLIP render alone gets 26/50, SigLIP 2 multi-view 31/50, the VLM 32/50, and every box where the VLM agreed with Gemini (31/50) was right, so agreement is a usable confidence.
@@ -140,6 +153,7 @@ pipeline/
 server.py             FastAPI: serves web/ + the pack's API_Contract routes, vision, copilot, work-order drafts
 seed_db.py            loads the Excel pack into PostgreSQL (14 sheets -> tables + indexes)
 docker-compose.yml    PostgreSQL 16 + the app (Dockerfile); .github/workflows: tests on every push
+deploy/cloudrun.sh    public read-only demo on Google Cloud Run (.gcloudignore: what is uploaded)
 web/
   index.html          three.js + Spark viewer, mission, proximity UI, copilot chat, in-browser CLIP vision
   scene.json          pipeline output (objects, grid, route, mapping)

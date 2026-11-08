@@ -89,6 +89,8 @@
   .quick { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .quick button { font:12px system-ui; padding:5px 10px; border-radius:14px; border:1px solid var(--line); background:#ffffff0a; color:var(--text); cursor:pointer; }
   .quick button:hover { border-color:var(--acc); color:var(--acc); }
+  /* public demo: labels are read-only, so the buttons that rewrite them are hidden */
+  .public #ai-grp, .public .gvis { display:none; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -116,7 +118,7 @@
       <button id="bimview" aria-pressed="false" title="Hide the scan and show clean blocks coloured by status, seen from above">🧱 BIM view</button>
       <button id="bim-btn" aria-pressed="true" title="Show or hide the 2D floor plan">🗺️ Mini-map</button>
     </div>
-    <div class="grp"><small>AI</small>
+    <div class="grp" id="ai-grp"><small>AI</small>
       <button id="ai" title="Re-run the in-browser vision model on every object (about 5 minutes; results are already saved)">Re-run AI labels</button>
       <button id="gemini-hud" title="Ask Gemini to name the objects in the current view (needs GEMINI_API_KEY on the server)">✨ Scan this view</button>
     </div>
@@ -237,6 +239,8 @@ $("#file").addEventListener("change", async (e) => {
 
 // ---------- scene data from the Python pipeline
 const S = await (await fetch(new URLSearchParams(location.search).get("scene") || "scene.json")).json(); // ?scene= to compare pipelines
+const CFG = await fetch("api/config").then((r) => r.json()).catch(() => ({}));
+if (CFG.public) document.body.classList.add("public");
 setSplat({ url: S.splat });
 const floorY = S.floor_y;
 const G = S.grid;

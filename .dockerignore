@@ -1,10 +1,9 @@
 .git
-data/
+# the image carries the Excel pack and the built scene, so it runs without downloads; the raw scans stay out
+data/*
+!data/builder_pack.xlsx
 work/
 .venv*/
 __pycache__/
-web/boiler_room_clean.ply
-web/boiler_room_clean.spz
-web/frames/
 web/_eval/
 .env

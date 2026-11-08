@@ -285,6 +285,39 @@ class PostgresBackend(unittest.TestCase):
         self.assertEqual(asyncio.run(call(b"text/plain")).status_code, 415)
         self.assertEqual(asyncio.run(call(b"application/json")), "passed")
 
+    def test_public_demo_is_read_only_and_limits_gemini(self):
+        import asyncio
+        from unittest import mock
+
+        from starlette.requests import Request
+
+        sys.path.insert(0, str(Path(__file__).parents[1]))
+        import server  # noqa: E402
+
+        self.addCleanup(server.engine.dispose)
+
+        async def post(path):
+            req = Request({"type": "http", "method": "POST", "path": path, "headers": [(b"content-type", b"application/json")]})
+
+            async def passed(_):
+                return "passed"
+
+            return await server.json_posts_only(req, passed)
+
+        with mock.patch.object(server, "PUBLIC", True), mock.patch.object(server, "GEMINI_PER_IP_HOUR", 2), \
+                mock.patch.object(server, "GEMINI_PER_DAY", 3), mock.patch.object(server, "_gemini_day", [0, 0]), \
+                mock.patch.object(server, "_gemini_ip", {}):
+            for path in server.WRITE_PATHS:
+                self.assertEqual(asyncio.run(post(path)).status_code, 403, path)
+            self.assertEqual(asyncio.run(post("/api/copilot/query")), "passed")  # asking stays open
+            t = 1_000_000.0
+            self.assertEqual([server.gemini_allowed("a", t + i) for i in range(3)], [True, True, False])  # per client per hour
+            self.assertTrue(server.gemini_allowed("a", t + 3601))  # the hour has passed
+            self.assertFalse(server.gemini_allowed("b", t + 3602))  # the server's daily cap (3) is used up
+            self.assertTrue(server.gemini_allowed("b", t + 86400))  # a new day
+        self.assertTrue(server.gemini_allowed("a"))  # local mode: no limit
+        self.assertEqual(asyncio.run(post("/api/vision")), "passed")
+
     def test_confidence_drops_with_data_quality_flags_and_weak_identity(self):
         # Builder question Q-06: poor sensor data or a weak 3D mapping must lower the confidence we show
         sys.path.insert(0, str(Path(__file__).parents[1]))

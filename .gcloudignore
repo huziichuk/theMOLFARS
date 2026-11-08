@@ -1,0 +1,15 @@
+# What `gcloud run deploy --source .` uploads to Cloud Build. Without this file gcloud would use .gitignore and
+# leave out the Excel pack and the built scene. Keep it in step with .dockerignore.
+.gcloudignore
+.git
+.github/
+data/*
+!data/builder_pack.xlsx
+work/
+.venv*/
+__pycache__/
+web/_eval/
+docs/
+inputs/
+tests/
+.env
