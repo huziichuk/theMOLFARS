@@ -48,7 +48,8 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 - The header is parsed and the body is read as an `N × P` float32 matrix (`np.frombuffer`, zero-copy).
 - **Sanity mask:** a row is valid if all its values are finite, |xyz| < 50, and log-scales are in (−20, 3).
 - **Corrupted-tail detection.** The whole rest of the file is cut from the first invalid row only if fewer than 50% of the rows after it are valid **and** the file's last 1,000 rows are mostly invalid. A bad block in the middle of an otherwise good file loses only its own rows. `tests/test_build_scene.py` covers a clean file, a garbage tail and a mid-file bad block. The original starter file (`Industrial Boiler Room.ply`) is valid only up to vertex 502,483. After that it holds noise (entropy 7.92 bits/byte, no float structure). Splats are stored in octree order, so the missing part is a whole region of the room.
-- **Slim splat for the viewer.** Only splats that cover surfaces (`max scale > 3 cm` and opacity ≥ 0.08) or are clearly visible (opacity ≥ 0.20) are kept, and the view-dependent colour (`f_rest_*`, 45 of 59 properties) is dropped. That gives 621,845 of 1,676,481 splats: 35 MB as float PLY (kept for isolation and downloads) and **9.4 MB as Niantic `.spz` v2** (`write_spz`: 24-bit fixed-point positions, byte alpha / DC colour / log-scale, w ≥ 0 quaternion xyz, gzip), which is what the viewer loads. Colours no longer change with the viewing angle. The full splat is still used for the grid, the boxes and the vision renders.
+- **Slim splat for the viewer.** Only splats that cover surfaces (`max scale > 3 cm` and opacity ≥ 0.08) or are clearly visible (opacity ≥ 0.20) are kept, and the view-dependent colour (`f_rest_*`, 45 of 59 properties) is dropped. That gives 621,845 of 1,676,481 splats: 35 MB as float PLY (kept for per-object downloads) and **9.4 MB as Niantic `.spz` v2** (`write_spz`: 24-bit fixed-point positions, byte alpha / DC colour / log-scale, w ≥ 0 quaternion xyz, gzip), which is what the viewer loads. Colours no longer change with the viewing angle. The full splat is still used for the grid, the boxes and the vision renders.
+- **Close-ups (`write_object_splats`).** The slim splat is fine from the aisle but blurs up close (P-005: 404 of its 1,253 splats, no colour terms). So every object (a multi-part object: its group) also gets its own `web/objects/<id>.spz` cut from the **full** scan: every splat inside the frame + 5 cm with its view-dependent colour (SH degree 3, written rgb-innermost as the spz format wants; checked against the PLY render of the same cut). 334 files, 38 MB, generated and git-ignored like the room splat.
 
 ### 1.2 World frame, floor, ceiling
 - The capture is y-down (COLMAP convention). World = rotate 180° about X: `(x, −y, −z)`. The viewer does the same with `mesh.rotation.x = π`.
@@ -138,6 +139,7 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 This is a single static page with no build step. It loads three.js 0.180 and Spark 2.4 (a Gaussian-splat renderer for three.js) from a CDN through an import map.
 
 - **Splat:** `SplatMesh({ url })`, rotated 180° about X to match the pipeline frame. *Export ▾ → Open another splat…* loads any local file through `fileBytes`.
+- **🔎 Close-up:** loads `objects/<id>.spz`; a Spark `SplatEdit` removes the room's own copy of the object inside the same box and another multiplies everything outside it by 0.3 (soft edge 0.4 m), so the room stays as a dim backdrop. The camera looks from the nearest walkable cell, where the scan saw the object, and the orbit is limited to ±60° of that side: the far side was never filmed and shows only noise.
 - **Boxes:** `EdgesGeometry` line boxes coloured by status: green healthy, amber warning, pulsing red target, grey unmapped, cyan discovered from video. Labels are `CSS2DObject`s.
 - **Mission:** the avatar (a capsule plus a proximity ring) moves along `path` at 0.45 m/s. On arrival it calls the copilot.
 - **Proximity display:** each frame, only boxes within **1.3 m** are visible (or all of them with *All objects*). Only the **6 nearest** get text labels, with Excel assets first, so labels never pile up. The side panel lists the nearby assets with their status chips.
@@ -288,7 +290,7 @@ The COLMAP path from the earlier design, kept for scans where the video register
 | GET | `/api/assets/{asset_id}/brief` | one cited status line (used while walking past) + its citation check |
 | GET | `/api/assets/{asset_id}/anomalies` | the Q-02 detector: score, per-signal z_level / z_trend / flag, 1 h series |
 | GET | `/api/priorities` | all 30 assets ranked by the Q-04 rule, with the reason |
-| GET | `/api/objects/{object_id}/splat.ply` | only the splats inside that object's (or its group's) frame, for 🔎 Isolate; cached in `work/isolate/` |
+| GET | `/api/objects/{object_id}/splat.ply` | only the splats inside that object's (or its group's) frame from the slim splat, for ⬇ PLY (and 🔎 Close-up on builds without `web/objects/`); cached in `work/isolate/` |
 | GET | `/api/scene/export.usda` | the semantic layer as OpenUSD (Q-09) |
 | GET | `/api/scene/export.ifc` | Scan-to-BIM: IFC4 with one element per frame and the Excel property sets |
 | GET | `/api/scene/plan.svg` | the semantic floor plan + section A-A |

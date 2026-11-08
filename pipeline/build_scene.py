@@ -84,9 +84,33 @@ def write_spz(path, rows, P, frac_bits=12):
     q /= np.linalg.norm(q, axis=1, keepdims=True) + 1e-12
     q *= np.where(q[:, :1] < 0, -1, 1)
     rot = to_u8(q[:, 1:] * 127.5 + 127.5)
-    head = struct.pack("<IIIBBBB", 0x5053474E, 2, n, 0, frac_bits, 0, 0)  # magic "NGSP", version 2, SH degree 0
-    body = b"".join(a.tobytes() for a in (pos, alpha, color, scale, rot))
+    parts = [pos, alpha, color, scale, rot]
+    degree = 3 if all(f"f_rest_{k}" in P for k in range(45)) else 0
+    if degree:  # view-dependent colour: PLY keeps 15 coefficients per channel (R block, G, B); spz wants rgb innermost
+        sh = col(*(f"f_rest_{c * 15 + k}" for k in range(15) for c in range(3)))
+        parts.append(to_u8(sh * 128 + 128))
+    head = struct.pack("<IIIBBBB", 0x5053474E, 2, n, degree, frac_bits, 0, 0)  # magic "NGSP", version 2
+    body = b"".join(a.tobytes() for a in parts)
     Path(path).write_bytes(gzip.compress(head + body, 6))
+
+
+def write_object_splats(outdir, rows, P, w, objs, groups):
+    """One .spz per object (a multi-part object: one per group) cut from the FULL scan: every splat inside the frame
+    + 5 cm with its view-dependent colour. The viewer's room splat drops the small and faint splats and the colour
+    terms, which is fine from the aisle but turns a close-up into a blur (P-005: 404 vs 1,253 splats)."""
+    import shutil
+
+    shutil.rmtree(outdir, ignore_errors=True)
+    outdir.mkdir(parents=True)
+    units = {g["id"]: (np.array(g["bmin"]), np.array(g["bmax"])) for g in groups}
+    units.update({f"OBJ-{i:03d}": (o["bmin"], o["bmax"]) for i, o in enumerate(objs) if not o.get("group")})
+    total = 0
+    for uid, (lo, hi) in units.items():
+        inside = np.all((w >= lo - 0.05) & (w <= hi + 0.05), axis=1)
+        if inside.sum() >= 20:
+            write_spz(outdir / f"{uid}.spz", rows[inside], P)
+            total += (outdir / f"{uid}.spz").stat().st_size
+    return len(units), total
 
 
 # ---------------------------------------------------------------- 2. frame + floor
@@ -907,6 +931,8 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     groups = group_fragments(objs)
     print(f"[groups] {len(groups)} multi-part objects from {sum(len(x['members']) for x in groups)} fragments; "
           f"{sum(1 for o in objs if o.get('obb'))} boxes oriented by PCA")
+    n_units, size = write_object_splats(out / "objects", rows, P, w, objs, groups)
+    print(f"[objects] {n_units} close-up splats with view-dependent colour in {out / 'objects'}, {size / 1e6:.1f} MB")
     tour = plan_tour(g, objs, start, floor)
     tour_shortest = plan_tour(g, objs, start, floor, urgent_first=False)
     print(f"[tour] {len(tour['stops'])} stops, {tour['length_m']:.1f} m urgent first, {tour_shortest['length_m']:.1f} m shortest"

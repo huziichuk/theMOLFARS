@@ -180,6 +180,27 @@ class SpzWriter(unittest.TestCase):
         np.testing.assert_allclose(rot[1], [0.6, 0, 0], atol=0.01)  # w >= 0 kept as is
         np.testing.assert_allclose(rot[0], [0, 0, 0], atol=0.01)    # w = -1 flipped to +1, xyz stay 0
 
+    def test_view_dependent_colour_is_written_rgb_innermost(self):
+        # the close-ups keep the scan's 45 f_rest terms; PLY stores them per channel (R 0-14, G 15-29, B 30-44)
+        import gzip
+        import tempfile
+
+        names = ["x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+                 "f_dc_0", "f_dc_1", "f_dc_2", "opacity"] + [f"f_rest_{k}" for k in range(45)]
+        Pz = {k: i for i, k in enumerate(names)}
+        row = np.zeros((1, len(names)), np.float32)
+        row[0, Pz["rot_0"]] = 1
+        row[0, Pz["f_rest_0"]], row[0, Pz["f_rest_15"]], row[0, Pz["f_rest_30"]] = 0.5, -0.5, 0.25  # R, G, B of coeff 1
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "t.spz"
+            B.write_spz(f, row, Pz)
+            raw = gzip.decompress(f.read_bytes())
+        self.assertEqual(raw[12], 3)  # SH degree
+        sh = np.frombuffer(raw[16 + 19:], np.uint8)  # after 19 bytes of position, alpha, colour, scale, rotation
+        self.assertEqual(len(sh), 45)
+        np.testing.assert_allclose((sh[:3].astype(float) - 128) / 128, [0.5, -0.5, 0.25], atol=1 / 128)
+        self.assertTrue((sh[3:] == 128).all())
+
 
 class Frames(unittest.TestCase):
     """Item 6: oriented frames for rotated objects and one group for touching parts of the same thing."""

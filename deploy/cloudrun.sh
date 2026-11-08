@@ -15,6 +15,7 @@ SECRET="gemini-api-key"
 for f in data/builder_pack.xlsx web/boiler_room_clean.spz web/boiler_room_clean.ply web/scene.json; do
   [ -f "$f" ] || { echo "missing $f: build the scene first (see README Quick start)"; exit 1; }
 done
+ls web/objects/*.spz >/dev/null 2>&1 || { echo "missing web/objects/*.spz (close-ups): rebuild the scene with build_scene.py"; exit 1; }
 
 gcloud config set project "$PROJECT"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
