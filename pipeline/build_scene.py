@@ -22,6 +22,7 @@ MIN_PTS = 30          # splats per object
 CELL = 0.10           # m, nav grid cell
 ROBOT_R = 0.22        # m, avatar radius for obstacle inflation
 HEAD = 1.7            # m, obstacles counted between floor+0.2 and floor+HEAD
+BOX_MARGIN = 0.10     # m, routes keep this far from the splats inside every 3D frame (the avatar body radius)
 
 
 # ---------------------------------------------------------------- 1. load + sanitize
@@ -137,11 +138,34 @@ def build_grid(w, opacity, floor):
     near = cKDTree(obs_pts).query(centres)[0].reshape(W, H) < ROBOT_R
     inflated = obstacle | near
     walk = seen_floor & ~inflated
+    return finish_grid(dict(origin=lo, W=int(W), H=int(H), obstacle=obstacle), walk)
+
+
+def finish_grid(g, walk):
     lab, n = ndimage.label(walk)
     if n > 1:  # keep the largest connected walkable region
         walk = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)
-    clearance = ndimage.distance_transform_edt(walk) * CELL
-    return dict(origin=lo, W=int(W), H=int(H), walk=walk, obstacle=obstacle, clearance=clearance)
+    return dict(g, walk=walk, clearance=ndimage.distance_transform_edt(walk) * CELL)
+
+
+def block_boxes(g, objs, w, opacity, floor):
+    """The splat test in build_grid only counts dense splats from 0.2 m up, so it missed low, sparse or overhanging
+    things (a pallet jack, a bin, a cabinet hanging at 1 m) and the avatar walked through their frames. Here every
+    splat inside a 3D frame between the ankles and the head is an obstacle, kept BOX_MARGIN away. Splats, not the
+    box rectangles: a rectangle around an L-shaped vessel covered free floor and cut off whole aisles."""
+    band = (opacity > 0.2) & (w[:, 1] > floor + 0.05) & (w[:, 1] < floor + HEAD)
+    pts = w[band]
+    inside = np.zeros(len(pts), bool)
+    for o in objs:
+        lo, hi = o["bmin"], o["bmax"]
+        if hi[1] - lo[1] < 0.08:  # flat: a mark on the floor, not a thing to walk around
+            continue
+        inside |= np.all((pts >= lo) & (pts <= hi), axis=1)
+    if not inside.any():
+        return g
+    centres = g["origin"] + (np.indices((g["W"], g["H"])).reshape(2, -1).T + 0.5) * CELL
+    near = cKDTree(pts[inside][:, [0, 2]]).query(centres)[0].reshape(g["W"], g["H"]) < BOX_MARGIN
+    return finish_grid(g, g["walk"] & ~near)
 
 
 # ---------------------------------------------------------------- 4. semantic objects
@@ -701,9 +725,40 @@ def polyline_length(path):
     return float(sum(np.linalg.norm(np.subtract(a, b)) for a, b in zip(path, path[1:])))
 
 
-def plan_tour(g, objs, start, floor):
-    """Q-04 inspection tour over every reachable non-healthy asset: urgent first, the shortest walk inside each
-    urgency level (greedy nearest stop by real path length)."""
+def best_order(D, first, items):
+    """Shortest open walk from node `first` through every node in `items` (exact, Held-Karp over the real leg
+    lengths D). shortcut: 2^n states, fine to ~14 stops; above that it falls back to nearest-next."""
+    n = len(items)
+    if n > 14:
+        order, here, left = [], first, list(items)
+        while left:
+            here = min(left, key=lambda j: D[here][j])
+            order.append(here); left.remove(here)
+        return order
+    dp = {(1 << k, k): (D[first][items[k]], None) for k in range(n)}
+    for mask in range(1, 1 << n):  # every subset comes before its supersets
+        for k in range(n):
+            if (mask, k) not in dp:
+                continue
+            cost = dp[mask, k][0]
+            for j in range(n):
+                if not mask & (1 << j):
+                    c = cost + D[items[k]][items[j]]
+                    if c < dp.get((mask | 1 << j, j), (np.inf,))[0]:
+                        dp[mask | 1 << j, j] = (c, k)
+    mask = (1 << n) - 1
+    k = min(range(n), key=lambda k: dp[mask, k][0]) if n else None
+    order = []
+    while k is not None:
+        order.append(items[k])
+        mask, k = mask ^ (1 << k), dp[mask, k][1]
+    return order[::-1]
+
+
+def plan_tour(g, objs, start, floor, urgent_first=True):
+    """Q-04 inspection tour over every reachable non-healthy asset: the urgent ones first, then all the others,
+    each part in the shortest order by real walking distance (exact, not nearest-next, which zigzagged).
+    urgent_first=False: the shortest walk over all of them."""
     todo, skipped = [], []
     for i, o in enumerate(objs):
         a = o.get("asset")
@@ -715,28 +770,31 @@ def plan_tour(g, objs, start, floor):
             skipped.append(a["tag"])
             continue
         todo.append(dict(i=i, goal=goal, a=a, p=priority(a["health_score"], a["criticality"], a["model_confidence"])))
-    path, stops, here = [cell_to_world(g, start, floor)], [], start
-    for tier in sorted({URGENCY_ORDER.get(t["a"]["urgency"], 1) for t in todo}):
-        left = [t for t in todo if URGENCY_ORDER.get(t["a"]["urgency"], 1) == tier]
-        while left:
-            legs = []
-            for t in left:
-                cells = astar(g, here, t["goal"])
-                if cells:
-                    way = [cell_to_world(g, c, floor) for c in smooth(g, cells)]
-                    legs.append((polyline_length(way), way, t))
-            if not legs:
-                skipped += [t["a"]["tag"] for t in left]
-                break
-            length, way, t = min(legs, key=lambda leg: leg[0])
-            path += way[1:]
-            a = t["a"]
-            stops.append(dict(asset_id=a["asset_id"], tag=a["tag"], object_id=f"OBJ-{t['i']:03d}", priority=t["p"],
-                              urgency=a["urgency"], condition_state=a["condition_state"], health_score=int(a["health_score"]),
-                              criticality=a["criticality"], model_confidence=float(a["model_confidence"]),
-                              leg_m=round(length, 2), path_index=len(path) - 1))
-            here = t["goal"]
-            left.remove(t)
+    nodes = [start] + [t["goal"] for t in todo]  # node 0 = the start, node k = todo[k - 1]
+    D = np.full((len(nodes), len(nodes)), np.inf)
+    ways = {}
+    for p in range(len(nodes)):
+        D[p, p] = 0
+        for q in range(p + 1, len(nodes)):
+            cells = astar(g, nodes[p], nodes[q])
+            if cells:
+                way = [cell_to_world(g, c, floor) for c in smooth(g, cells)]
+                D[p, q] = D[q, p] = polyline_length(way)
+                ways[p, q], ways[q, p] = way, way[::-1]
+    reach = [k for k in range(1, len(nodes)) if np.isfinite(D[0, k])]
+    skipped += [todo[k - 1]["a"]["tag"] for k in range(1, len(nodes)) if k not in reach]
+    urgent = [k for k in reach if URGENCY_ORDER.get(todo[k - 1]["a"]["urgency"], 1) == 0] if urgent_first else []
+    order = best_order(D, 0, urgent)
+    order += best_order(D, order[-1] if order else 0, [k for k in reach if k not in urgent])
+    path, stops, here = [cell_to_world(g, start, floor)], [], 0
+    for k in order:
+        path += ways[here, k][1:]
+        t, a = todo[k - 1], todo[k - 1]["a"]
+        stops.append(dict(asset_id=a["asset_id"], tag=a["tag"], object_id=f"OBJ-{t['i']:03d}", priority=t["p"],
+                          urgency=a["urgency"], condition_state=a["condition_state"], health_score=int(a["health_score"]),
+                          criticality=a["criticality"], model_confidence=float(a["model_confidence"]),
+                          leg_m=round(float(D[here, k]), 2), path_index=len(path) - 1))
+        here = k
     return dict(stops=stops, path=path, length_m=round(polyline_length(path), 2), skipped=skipped)
 
 
@@ -798,6 +856,9 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
         print(f"[vision] using {vision} (found in outdir; delete it or build into another dir for shape-only classes)")
     if vision:
         print(f"[vision] {apply_vision(objs, vision, geo_id, floor=floor, base_geo_id=base_geo_id)} boxes take their class from {vision}")
+    before = int(g["walk"].sum())
+    g = block_boxes(g, objs, w, opacity, floor)
+    print(f"[grid] 3D frames as obstacles: walkable {before} -> {int(g['walk'].sum())} cells")
     rng = np.random.default_rng(7)
     target = map_assets(objs, xlsx, rng, g)
     target_asset, tcls = target["asset_id"], target["asset_class"]
@@ -847,7 +908,9 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
     print(f"[groups] {len(groups)} multi-part objects from {sum(len(x['members']) for x in groups)} fragments; "
           f"{sum(1 for o in objs if o.get('obb'))} boxes oriented by PCA")
     tour = plan_tour(g, objs, start, floor)
-    print(f"[tour] {len(tour['stops'])} stops, {tour['length_m']:.1f} m" + (f", unreachable: {tour['skipped']}" if tour["skipped"] else ""))
+    tour_shortest = plan_tour(g, objs, start, floor, urgent_first=False)
+    print(f"[tour] {len(tour['stops'])} stops, {tour['length_m']:.1f} m urgent first, {tour_shortest['length_m']:.1f} m shortest"
+          + (f", unreachable: {tour['skipped']}" if tour["skipped"] else ""))
 
     def jsonable(v):
         if isinstance(v, (np.integer,)): return int(v)
@@ -872,7 +935,8 @@ def main(ply, xlsx, outdir, vision=None, boxes=None):
                  for i, o in enumerate(objs)],
         target_object=f"OBJ-{ti:03d}", target_asset=target_asset,
         path=path,
-        tour=tour,  # Q-04 inspection tour over every non-healthy asset
+        tour=tour,  # Q-04 inspection tour over every non-healthy asset, urgent first
+        tour_shortest=tour_shortest,  # the same stops in the shortest order
         groups=groups,  # multi-part objects (display layer; object IDs and scene_id unchanged)
     )
     # vision_labels.json and video_labels.json are keyed by it: object IDs are valid only for these exact boxes

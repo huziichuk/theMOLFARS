@@ -38,6 +38,15 @@ class Sanitize(unittest.TestCase):
 class InspectionTour(unittest.TestCase):
     """Builder question Q-04: priority from condition, criticality and uncertainty; urgent stops first."""
 
+    def test_stop_order_is_the_shortest_walk_not_nearest_next(self):
+        # start at 0 on a line; stops at +1, -2, +6. Nearest-next: 0→1→-2→6 = 1+3+8 = 12; best: 0→-2→1→6 = 2+3+5 = 10
+        x = [0, 1, -2, 6]
+        D = np.abs(np.subtract.outer(x, x)).astype(float)
+        order = B.best_order(D, 0, [1, 2, 3])
+        self.assertEqual(order, [2, 1, 3])
+        self.assertEqual(sum(D[a, b] for a, b in zip([0] + order, order)), 10)
+        self.assertEqual(B.best_order(D, 0, []), [])
+
     def test_priority_rises_with_damage_criticality_and_uncertainty(self):
         base = B.priority(60, "B - important", 0.8)
         self.assertGreater(B.priority(40, "B - important", 0.8), base)   # less healthy
@@ -50,8 +59,11 @@ class InspectionTour(unittest.TestCase):
         sick = {o["asset"]["asset_id"] for o in SAVED["scene"]["objects"] if o.get("asset") and o["asset"]["condition_state"] != "healthy"}
         skipped = {o["asset"]["asset_id"] for o in SAVED["scene"]["objects"] if o.get("asset") and o["asset"]["tag"] in t["skipped"]}
         self.assertEqual({st["asset_id"] for st in t["stops"]} | skipped >= sick, True)  # skipped holds tags, stops ids
-        tiers = [B.URGENCY_ORDER[st["urgency"]] for st in t["stops"]]
-        self.assertEqual(tiers, sorted(tiers))
+        urgent = [st["urgency"] == "high" for st in t["stops"]]
+        self.assertEqual(urgent, sorted(urgent, reverse=True))  # every urgent stop before any other; the rest by distance
+        short = SAVED["scene"]["tour_shortest"]
+        self.assertEqual({st["asset_id"] for st in short["stops"]}, {st["asset_id"] for st in t["stops"]})
+        self.assertLessEqual(short["length_m"], t["length_m"])
         idx = [st["path_index"] for st in t["stops"]]
         self.assertEqual(idx, sorted(idx))
         self.assertLess(idx[-1], len(t["path"]))
@@ -219,6 +231,23 @@ class NavGrid(unittest.TestCase):
 
     def test_narrow_gap_does_not(self):
         self.assertFalse(self.both_sides_walkable(self.room_with_gap(0.3)))
+
+    def test_low_object_in_a_frame_blocks_but_a_floor_mark_does_not(self):
+        # a 15 cm pallet jack is below the 0.2 m splat band, so only its 3D frame can stop the avatar walking over it
+        g = np.arange(-1.5, 1.5, 0.03)
+        fx, fz = np.meshgrid(g, g)
+        floor = np.c_[fx.ravel(), np.zeros(fx.size), fz.ravel()]
+        px, py, pz = np.meshgrid(np.arange(-0.2, 0.2, 0.02), np.arange(0.06, 0.16, 0.02), np.arange(-0.3, 0.3, 0.02))
+        jack = np.c_[px.ravel(), py.ravel(), pz.ravel()]
+        w = np.r_[floor, jack]
+        op = np.ones(len(w))
+        grid = B.build_grid(w, op, 0.0)
+        cell = tuple(((np.array([0.0, 0.0]) - grid["origin"]) / B.CELL).astype(int))
+        self.assertTrue(grid["walk"][cell])  # the splat test alone walks over it
+        frame = dict(bmin=np.array([-0.2, 0.05, -0.3]), bmax=np.array([0.2, 0.16, 0.3]))
+        self.assertFalse(B.block_boxes(grid, [frame], w, op, 0.0)["walk"][cell])
+        mark = dict(bmin=np.array([-0.2, 0.0, -0.3]), bmax=np.array([0.2, 0.03, 0.3]))  # flat: a stain on the floor
+        self.assertTrue(B.block_boxes(grid, [mark], w, op, 0.0)["walk"][cell])
 
 
 class AssetMapping(unittest.TestCase):

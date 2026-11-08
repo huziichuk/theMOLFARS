@@ -63,7 +63,7 @@ On the first visit an intro explains the demo in four steps and offers **▶ Sta
 
 The toolbar, left to right:
 - **▶ Start mission** (highlighted): the avatar walks to the faulty pump P-005; the camera switches to Follow and the copilot diagnoses on arrival. The mission card under the toolbar says the fault, health and walk length in plain words.
-- **🧭 Inspection tour**: walks to all non-healthy assets, urgent first; each stop shows its priority and why.
+- **🧭 Inspection tour**: asks for the order (urgent first, or the shortest walk) and walks to all non-healthy assets. At each stop the avatar waits and the chat shows the priority, why, and buttons **▶ Next stop**, **🔎 Open asset card** and **⏹ End tour**.
 - **🎬 Guided demo**: a 6-step scripted walkthrough with captions (overview, floor plan, mission, diagnosis, isolation, tour), for recording the video in one take.
 - **Camera: Follow / Orbit / Walk** (WASD, arrows): Walk mode collides with the nav grid.
 - **Show: All objects**: frames every detected object. Otherwise only frames inside the proximity radius are shown, with labels on the 6 nearest (name only; the confidence is in the label's tooltip).
@@ -174,11 +174,11 @@ requirements.txt      pipeline + server deps;  requirements-gpu.txt: option-2 de
 | Splats | 1,676,481, all valid; the viewer gets 621,845 surface splats without view-dependent colour as `.spz` (**9.4 MB** instead of 396 MB) |
 | Scan-to-BIM (IFC4) | 414 elements (18 IfcPump, 15 IfcValve, 5 IfcElectricMotor, 9 IfcFlowInstrument, 2 IfcSensor, 44 IfcTank, 15 IfcElectricDistributionBoard, 70 IfcPipeSegment, …), Pset_ValmetAsset on the 30 mapped assets; schema-valid, geometry matches the frames to the millimetre |
 | Room height | floor y −1.17, ceiling y 0.87 (2.04 scan units) |
-| Nav grid | 97×83 cells of 10 cm; 2,276 walkable (+59% after measuring clearance to the real splats; the rest of the floor is clutter or gaps narrower than 0.44 m) |
+| Nav grid | 97×83 cells of 10 cm; 2,152 walkable (2,276 from the splat test, minus 124 next to low or overhanging objects inside 3D frames: a pallet jack, a bin, a hanging cabinet) |
 | Segmentation | 414 framed objects |
 | Excel mapping | all 30 assets on boxes vision reads as pump / motor / valve / gauge / sensor, placed by a size-and-class fit score; target ASSET-017 / P-005 on OBJ-115, a reachable box vision reads as a pump |
-| Route | 8.9 m, 11 waypoints, along the equipment wall; ≥ 0.224 m from every obstacle splat |
-| Inspection tour (Q-04) | 13 stops, 56.8 m: 4 urgent (M-006, P-005, P-002, CV-003), 7 medium, 2 routine; all reachable |
+| Route | 9.2 m, 12 waypoints; ≥ 0.22 m from every obstacle splat and ≥ 0.11 m from every splat inside a 3D frame (before: 3–8 mm from a bin) |
+| Inspection tour (Q-04) | 13 stops, all reachable. Urgent first (M-006, P-005, CV-003, P-002), then the shortest walk: **42.9 m** (was 57.5 m with nearest-next). Shortest walk over all 13: **25.3 m**. The avatar waits at every stop until ▶ Next stop |
 | Frames | 414 boxes = 49 multi-part objects (129 fragments) + 285 single ones; 88 yaw-oriented |
 | Telemetry detector (Q-02) | AUC 0.91 separating the 13 non-healthy from the 17 healthy assets, without using their labels |
 | Tests | 27 unit tests (6 need the Excel pack and skip in CI) |

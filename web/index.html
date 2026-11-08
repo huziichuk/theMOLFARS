@@ -105,7 +105,7 @@
   <div id="hud">
     <div class="grp">
       <button id="play" class="primary" title="The avatar walks to the faulty pump P-005 and the copilot diagnoses it on arrival">▶ Start mission</button>
-      <button id="tour" title="Visit every asset that is not healthy: the most urgent first, then the shortest walk">🧭 Inspection tour</button>
+      <button id="tour" title="Visit every asset that is not healthy, stopping at each one: urgent first or the shortest walk">🧭 Inspection tour</button>
       <button id="demo" title="A 2-minute guided walkthrough with captions">🎬 Guided demo</button>
     </div>
     <div class="grp"><small>Camera</small>
@@ -363,23 +363,45 @@ $("#play").onclick = () => {
   $("#play").textContent = playing ? "⏸ Pause" : "▶ Resume";
   wake(1500);
 };
-$("#tour").onclick = () => {
-  const T = S.tour;
-  if (!T?.stops.length) return say("bot", "No inspection tour in this scene (rebuild with build_scene.py).");
-  tour = { stops: T.stops, at: new Map(T.stops.map((st) => [st.path_index, st])), ids: new Set(T.stops.map((st) => st.asset_id)), done: 0 };
+$("#tour").onclick = () => { // ask for the order; both tours are planned exactly by the pipeline
+  if (!S.tour?.stops.length) return say("bot", "No inspection tour in this scene (rebuild with build_scene.py).");
+  const div = say("bot", `🧭 **Inspection tour: ${S.tour.stops.length} non-healthy assets.** In which order?`);
+  div.insertAdjacentHTML("beforeend", `<div class="quick"><button type="button" data-k="tour" title="Q-04: the urgent assets first, then the shortest walk over the rest">⚠️ Urgent first · ${S.tour.length_m} m</button>`
+    + (S.tour_shortest ? `<button type="button" data-k="tour_shortest" title="The same assets in the shortest walking order">📏 Shortest walk · ${S.tour_shortest.length_m} m</button>` : "") + "</div>");
+  div.querySelectorAll(".quick button").forEach((b) => (b.onclick = () => startTour(S[b.dataset.k], b.dataset.k === "tour")));
+  wake(800);
+};
+function startTour(T, urgentFirst, auto = false) { // auto: the guided demo walks on without waiting
+  tour = { stops: T.stops, at: new Map(T.stops.map((st) => [st.path_index, st])), ids: new Set(T.stops.map((st) => st.asset_id)), done: 0, auto };
   useRoute(T.path); playing = true; setMode("follow");
   $("#tour").setAttribute("aria-pressed", true); $("#play").textContent = "⏸ Pause";
-  say("bot", `🧭 **Inspection tour: ${T.stops.length} non-healthy assets, ${T.length_m} m** — urgent first, then the shortest walk.\n`
+  say("bot", `🧭 **Inspection tour: ${T.stops.length} assets, ${T.length_m} m** — ${urgentFirst ? "urgent first, then the shortest walk" : "the shortest walk"}.\n`
     + `Priority = (1 − health) × criticality (A 1.0, B 0.75, C 0.5) × (1 + uncertainty), the Q-04 rule.\n`
     + T.stops.map((st, i) => `${i + 1}. ${st.tag} [${st.asset_id}] ${st.urgency}, priority ${st.priority}`).join("\n")
-    + (T.skipped.length ? `\nNot reachable from the floor: ${T.skipped.join(", ")}` : ""));
+    + (T.skipped.length ? `\nNot reachable from the floor: ${T.skipped.join(", ")}` : "")
+    + (auto ? "" : "\nThe avatar waits at every asset: look around, ask about it, then press **▶ Next stop**."));
   wake(1500);
-};
+}
+function endTour() {
+  tour = null; playing = false; arrived = true; navTo = null;
+  $("#tour").setAttribute("aria-pressed", false); $("#play").textContent = "▶ Start mission";
+}
 async function onStop(st) {
   tour.done++;
+  const next = tour.stops[tour.done], wait = next && !tour.auto;
+  if (wait) { playing = false; $("#play").textContent = "▶ Next stop"; status(`Inspection tour · at ${st.tag}, stop ${tour.done}/${tour.stops.length} — press ▶ Next stop`); }
   const u = (1 - st.model_confidence).toFixed(2);
-  say("bot", `🧭 **Stop ${tour.done}/${tour.stops.length}: ${st.tag}** — priority ${st.priority} `
+  const div = say("bot", `🧭 **Stop ${tour.done}/${tour.stops.length}: ${st.tag}** — priority ${st.priority} `
     + `(${st.condition_state.replace("_", " ")}, health ${st.health_score}, criticality ${st.criticality[0]}, uncertainty ${u}, urgency ${st.urgency})`);
+  const o = byId.get(st.object_id);
+  if (wait) {
+    div.insertAdjacentHTML("beforeend", `<div class="quick"><button type="button" data-a="next">▶ Next stop: ${esc(next.tag)} · ${next.leg_m} m</button>`
+      + `${o ? '<button type="button" data-a="card">🔎 Open asset card</button>' : ""}<button type="button" data-a="end">⏹ End tour</button></div>`);
+    div.querySelector('[data-a="next"]').onclick = () => { if (tour && !playing) $("#play").click(); };
+    div.querySelector('[data-a="card"]')?.addEventListener("click", () => select(o));
+    div.querySelector('[data-a="end"]').onclick = endTour;
+  }
+  wake(1500);
   const r = await fetch(`api/assets/${st.asset_id}/brief`).then((r) => r.json()).catch(() => null);
   if (r?.line) markCites(say("bot", r.line), r.citations);
 }
@@ -411,7 +433,7 @@ $("#demo").onclick = async () => {
     await sleep(7000);
     unisolate();
     caption("6/6 · Inspection tour (Q-04): every non-healthy asset, urgent first, shortest walk");
-    $("#tour").click();
+    startTour(S.tour, true, true);
     await sleep(15000);
   } finally {
     caption(""); demoRunning = false;
@@ -548,11 +570,11 @@ $("#all").onclick = (e) => { showAll = !showAll; e.target.setAttribute("aria-pre
 
 function stepMission(dt) {
   if (!playing || arrived) return;
-  let move = (tour ? 2 * SPEED : SPEED) * dt; // the tour is ~57 m: walk it at double speed
+  let move = (tour ? 2 * SPEED : SPEED) * dt; // the tour is 25-43 m: walk it at double speed
   while (move > 0 && seg < pts.length - 1) {
     const to = pts[seg + 1].clone().setY(floorY);
     const d = to.distanceTo(avatar.position);
-    if (d <= move) { avatar.position.copy(to); seg++; move -= d; if (tour?.at.has(seg)) onStop(tour.at.get(seg)); }
+    if (d <= move) { avatar.position.copy(to); seg++; move -= d; if (tour?.at.has(seg)) { onStop(tour.at.get(seg)); if (!playing) move = 0; } }
     else { avatar.position.lerp(to, move / d); avatar.lookAt(to.x, floorY, to.z); move = 0; }
   }
   if (seg >= pts.length - 1) {

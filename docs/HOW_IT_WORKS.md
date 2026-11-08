@@ -58,7 +58,8 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 - **Observed floor** = cells with splats within ±12 cm of the floor height. A binary closing (4 iterations) and hole filling close gaps.
 - **Obstacles** = cells with opaque splats between floor + 0.2 m and floor + 1.7 m (head height). A cell counts if it has ≥ 4 hits after a morphological opening, or ≥ 12 hits on its own.
 - **Clearance:** a cell is blocked when any splat of an obstacle cell lies closer than the avatar radius (0.22 m) to the cell centre (k-d tree over the obstacle splats). Distances go to the real splats, not to whole 10 cm cells: the cell-based test made every gap 10–15 cm narrower than it is and cut the corridor along the equipment wall (a 0.9 m gap between an insulated pipe bend and a shelf) off from the rest of the room.
-- **Result:** 2,276 walkable cells (1,431 with the first, dilation-based margin: +59%) for the same 0.22 m person radius. The rest of the floor is shelves, boxes, carts and machines, or gaps narrower than 0.44 m. The route keeps ≥ 0.224 m from every obstacle splat (checked every 2 cm). `tests` has a wall with a 0.6 m gap (passable) and a 0.3 m gap (not).
+- **Frames are obstacles too (`block_boxes`).** The band above only counts dense splats from 0.2 m, so a 13 cm pallet jack, a 43 cm bin and a cabinet hanging at 1 m were invisible to it and routes went through them. Every splat (opacity > 0.2) inside a 3D frame between 5 cm and head height now blocks the cells within 0.10 m (the avatar's body radius). The splats, not the frame rectangles: a rectangle around an L-shaped vessel covered free floor, and with a 0.15 m margin one bin cut off the whole corridor along the top wall (566 cells).
+- **Result:** 2,276 walkable cells from the splat test (1,431 with the first, dilation-based margin: +59%) for the same 0.22 m person radius, 2,152 after the frames. The rest of the floor is shelves, boxes, carts and machines, or gaps narrower than 0.44 m. The route keeps ≥ 0.224 m from every obstacle splat (checked every 2 cm). `tests` has a wall with a 0.6 m gap (passable) and a 0.3 m gap (not).
 - **Walkable** = observed floor ∧ ¬inflated obstacle, keeping only the largest connected component.
 - A clearance map (Euclidean distance transform) is kept for path costs.
 
@@ -104,8 +105,9 @@ Output: `web/scene.json`, `web/boiler_room_clean.ply`, `web/floorplan.png`.
 
 ### 1.6a Inspection tour (Builder Question Q-04)
 - **Priority** = `(1 − health/100) × criticality weight (A 1.0, B 0.75, C 0.5) × (1 + (1 − model_confidence))`: damage times importance, and an uncertain diagnosis is worth checking sooner. The same function ranks `/api/priorities`.
-- **Order:** urgency level first (high → medium → routine, from `Current_State`), then inside each level the nearest next stop by real A* path length (greedy).
-- Every non-healthy asset whose box is within 1.5 m of the floor is a stop; the rest are listed as unreachable. Result: 13 stops, 56.8 m, none skipped, saved as `tour` in `scene.json` with each stop's path index.
+- **Order:** two tours are saved. `tour`: the urgent assets (`urgency` high in `Current_State`) first, then all the others; `tour_shortest`: all of them in one. Each part is the exact shortest open walk over the real A* leg lengths (`best_order`, Held-Karp, fine to ~14 stops, nearest-next above that). Nearest-next zigzagged: 57.5 m against 42.9 m now; the shortest walk is 25.3 m.
+- **In the viewer** the user picks the order; the avatar waits at every stop (▶ Next stop, 🔎 Open asset card, ⏹ End tour). The guided demo walks on without waiting.
+- Every non-healthy asset whose box is within 1.5 m of the floor is a stop; the rest are listed as unreachable. Result: 13 stops, 42.9 m (shortest: 25.3 m), none skipped, saved as `tour` in `scene.json` with each stop's path index.
 
 ### 1.6b Frames: groups and orientation (display layer)
 - **Groups:** boxes of one vision class without an Excel asset that touch (≤ 3 cm) are union-found into one multi-part object (`GRP-…`): 49 groups from 129 fragments (pipe runs, shelves, walls). The viewer draws one frame per group.

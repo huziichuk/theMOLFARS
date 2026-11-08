@@ -18,7 +18,7 @@
 | Gemini vision | `gemini-3.5-flash-lite` multimodal: batch contact sheets (`gemini_vision.py`), one object and current view (`/api/vision/gemini*`); JSON output constrained to the `vocab.json` classes | needs `GEMINI_API_KEY` | `pipeline/gemini_vision.py`, `server.py` |
 | Label refinement | `refine_vision`: render/photo fusion + geometry and room-specific rules; `asset_fit_score` for the Excel mapping | | `build_scene.py` |
 | Telemetry detector | Robust level + trend z-scores (median/MAD baseline), RMS over signals; NumPy | AUC 0.91 on the pack | `server.py` (`detect_anomalies`) |
-| Planning | Q-04 priority, urgency tiers + greedy nearest stop by A* length | | `build_scene.py` (`priority`, `plan_tour`) |
+| Planning | Q-04 priority; urgent first, then the exact shortest order by A* length (Held-Karp) | | `build_scene.py` (`priority`, `plan_tour`) |
 | Interop | OpenUSD text export (no USD library); MQTT bridge (`paho-mqtt`, optional) | Omniverse / Unity / Unreal / Blender | `pipeline/export_usd.py`, `pipeline/mqtt_bridge.py` |
 | Scan-to-BIM | IFC4 STEP writer (no IFC library) + SVG plan / section; validated with ifcopenshell | Revit, Bonsai, Solibri, xeokit | `pipeline/export_bim.py` |
 | Splat format | Niantic `.spz` v2 writer (NumPy + gzip) for the viewer; float PLY kept for crops | Spark loads `.spz` natively | `build_scene.py` (`write_spz`) |
